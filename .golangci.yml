@@ -1,0 +1,107 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# golangci-lint configuration, v2 schema.
+#
+# Inert until the repository contains Go code. golangci-lint runs only
+# from the pre-commit hooks, which use always_run with an early manifest
+# guard. That guard lives in .github/hooks/manifest-guard.sh and is
+# shared by every language hook. Its tests run against the git index
+# rather than the filesystem, so an untracked go.mod on disk cannot
+# satisfy it: a commit carrying sources but not their module file
+# would otherwise pass locally and land a tree nobody else can build.
+#
+# Coverage is decided per source file. A tracked module file in a
+# subdirectory excuses only the sources beneath it, so a repository
+# holding both a nested module and Go sources outside it still fails
+# rather than letting the nested module mask a deleted root go.mod.
+# Where a root go.mod is tracked the hooks run and this configuration
+# applies; where the repository has no Go sources at all they exit 0
+# without invoking the toolchain, and this file is never read.
+#
+# The guard is deliberately not a '\.go$' file matcher. pre-commit drops
+# deleted paths before matching, so a matcher would skip a commit that
+# only removes Go sources -- exactly the commit most likely to leave
+# go.mod stale.
+#
+# The 'version' key is mandatory in the v2 schema. A configuration that
+# omits it is interpreted as v1 and rejected outright by golangci-lint
+# v2, which is precisely the failure this file exists to prevent in
+# projects created from this template.
+
+version: "2"
+
+run:
+  timeout: 5m
+  # Lint test files as well. They are the easiest place for unchecked
+  # errors and weak helpers to accumulate unnoticed.
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - goconst
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    errcheck:
+      # Report explicit discards ('_ = doWork()') as well as wholly
+      # ignored returns. This defaults to false, which would leave the
+      # most deliberate form of discard unreported while gosec's
+      # overlapping G104 is disabled below -- so nothing would inspect
+      # it, contradicting the exclusion note further down.
+      #
+      # A genuinely intentional discard should carry '//nolint:errcheck'
+      # with a reason, which states the intent in the source rather than
+      # relying on a silent default.
+      check-blank: true
+    gocyclo:
+      min-complexity: 25
+    govet:
+      enable:
+        - shadow
+    misspell:
+      locale: US
+    gosec:
+      excludes:
+        # Unhandled errors: errcheck already reports these, and running
+        # both produces two findings for one defect.
+        - G104
+
+  exclusions:
+    rules:
+      # Test fixtures legitimately use weak randomness and hardcoded
+      # credentials, so gosec is scoped to production code.
+      #
+      # errcheck is deliberately NOT excluded here. Discarded errors in
+      # tests are exactly what 'tests: true' above exists to catch, and
+      # G104 is already disabled globally, so excluding errcheck too
+      # would leave no enabled rule inspecting them.
+      - path: "_test\\.go$"
+        linters:
+          - gosec
+
+# The v2 schema moved formatting out of 'linters' into its own section.
+# Note that 'golangci-lint run' only reports formatter differences; it is
+# 'golangci-lint fmt' that applies them. The go-fmt pre-commit hook runs
+# the latter, so both formatters below are applied before the lint hook
+# checks them.
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
