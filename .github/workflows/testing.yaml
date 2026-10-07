@@ -1,6 +1,6 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Action test/validation workflow
 name: "Test GitHub Action 🧪"
@@ -19,14 +19,24 @@ concurrency:
 
 permissions: {}
 
+env:
+  # Multi-architecture indexes from Docker Hub, pinned by digest, staged
+  # into the local registry as the merge lane's snapshot publish would.
+  # yamllint disable-line rule:line-length
+  BUSYBOX: 'docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e'
+  # yamllint disable-line rule:line-length
+  ALPINE: 'docker.io/library/alpine@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412'
+  # yamllint disable-line rule:line-length
+  CONTAINERS: '[{"name":"lf/busybox","version":"1.0.0-20260101T000000Z"},{"name":"lf/alpine","version":"1.0.0-20260101T000000Z"}]'
+
 jobs:
-  ### Test the GitHub Action in this Repository ###
-  tests:
-    name: "Test local GitHub Action"
+  ### Offline tests, including the differential against the lane ###
+  unit:
+    name: "Unit and equivalence tests"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 15
     steps:
       # Load the egress allow-list out-of-band from the
       # organisation's .github repository and publish it as
@@ -36,7 +46,6 @@ jobs:
         with:
           config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
 
-      # Harden the runner with the just-loaded allow-list.
       - name: 'Harden runner (block)'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
@@ -46,45 +55,346 @@ jobs:
             ${{ env.CONNECTION_ALLOW_LIST }}
 
       - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
+      - name: "Run tests"
         shell: bash
         run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
+          # Run tests
+          # A scripted crane stands in for the registries, and the
+          # vendored lane bodies run under bash with jq, as on the runner.
+          set -euo pipefail
+          python3 -m unittest discover -s tests -t . -v
 
-      - name: "Running local action: ${{ github.repository }}"
+  ### Promotion against a real registry ###
+  registry:
+    name: "Promote (local registry)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    services:
+      registry:
+        # yamllint disable-line rule:line-length
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # Docker Hub serves the staged indexes; GitHub's release assets
+      # serve the pinned crane.
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Stage images"
+        shell: bash
+        run: |
+          # Stage images
+          # imagetools copies an index as is, so the staged digests are
+          # the pinned ones: independent of the action under test.
+          set -euo pipefail
+          stage=localhost:5000/staging/lf
+          docker buildx imagetools create \
+            -t "${stage}/busybox:1.0.0-20260101T000000Z" "${BUSYBOX}"
+          docker buildx imagetools create \
+            -t "${stage}/alpine:1.0.0-20260101T000000Z" "${ALPINE}"
+
+      - name: "Verify before release"
+        id: verify
         uses: $/
         with:
-          input: "test input 💬"
+          mode: verify
+          containers_json: ${{ env.CONTAINERS }}
+          release_tag: '1.0.0'
+          pull_registry: localhost:5000/staging
+          push_registry: localhost:5000/release
+          push_latest: 'true'
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Promote"
+        id: first
+        uses: $/
+        with:
+          containers_json: ${{ env.CONTAINERS }}
+          release_tag: '1.0.0'
+          pull_registry: localhost:5000/staging
+          push_registry: localhost:5000/release
+          push_latest: 'true'
+
+      - name: "Promote again (already released)"
+        id: again
+        uses: $/
+        with:
+          containers_json: ${{ env.CONTAINERS }}
+          release_tag: '1.0.0'
+          pull_registry: localhost:5000/staging
+          push_registry: localhost:5000/release
+
+      # The staged tag now names different bits: the release tag must
+      # not follow it.
+      - name: "Re-stage busybox with other bits"
+        shell: bash
+        run: |
+          # Re-stage busybox with other bits
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t localhost:5000/staging/lf/busybox:1.0.0-20260101T000000Z \
+            "${ALPINE}"
+
+      - name: "Promote a changed source (must fail)"
+        id: changed
+        continue-on-error: true
+        uses: $/
+        with:
+          containers_json: ${{ env.CONTAINERS }}
+          release_tag: '1.0.0'
+          pull_registry: localhost:5000/staging
+          push_registry: localhost:5000/release
+
+      - name: "Verify a missing staged image (must fail)"
+        id: missing
+        continue-on-error: true
+        uses: $/
+        with:
+          mode: verify
+          containers_json: '[{"name":"lf/ghost","version":"1.0.0"}]'
+          release_tag: '1.0.0'
+          pull_registry: localhost:5000/staging
+          push_registry: localhost:5000/release
+
+      # The hosts hold none of these images and harden-runner blocks
+      # them: a dry run must not need them.
+      - name: "Dry run"
+        id: dry
+        uses: $/
+        with:
+          dry_run: 'true'
+          containers_json: ${{ env.CONTAINERS }}
+          release_tag: '1.0.0'
+          pull_registry: 'nexus3.onap.org:10003'
+          push_registry: 'nexus3.onap.org:10002'
+          push_latest: 'true'
+
+      - name: "Validate against the registry"
         shell: bash
         env:
-          REPO: ${{ github.repository }}
+          VERIFY: ${{ steps.verify.outputs.promoted }}
+          VERIFY_LATEST: ${{ steps.verify.outputs.latest }}
+          FIRST: ${{ steps.first.outputs.promoted }}
+          FIRST_COUNT: ${{ steps.first.outputs.promoted_count }}
+          FIRST_LATEST: ${{ steps.first.outputs.latest }}
+          AGAIN: ${{ steps.again.outputs.promoted }}
+          AGAIN_SKIPPED: ${{ steps.again.outputs.skipped_count }}
+          CHANGED: ${{ steps.changed.outcome }}
+          CHANGED_PROMOTED: ${{ steps.changed.outputs.promoted }}
+          MISSING: ${{ steps.missing.outcome }}
+          MISSING_PROMOTED: ${{ steps.missing.outputs.promoted }}
+          DRY: ${{ steps.dry.outputs.promoted }}
+          DRY_ENDPOINT: ${{ steps.dry.outputs.push_endpoint }}
         run: |
-          # Local action validation
-          echo "Validated local action: $REPO"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          # Validate against the registry
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          statuses() { jq -r '[.[].status] | join(",")' <<< "$1"; }
+          registry=http://localhost:5000/v2
+          accept=()
+          for type in oci.image.index.v1 oci.image.manifest.v1 \
+            docker.distribution.manifest.list.v2 \
+            docker.distribution.manifest.v2; do
+            accept+=(-H "Accept: application/vnd.${type}+json")
+          done
+          head_digest() {
+            # The registry's Docker-Content-Digest for a tag; empty if absent.
+            curl -sS -o /dev/null -D - -I "${accept[@]}" \
+              "${registry}/$1/manifests/$2" \
+              | tr -d '\r' \
+              | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}'
+          }
+          body_digest() {
+            # SHA-256 of the manifest bytes the registry serves.
+            echo "sha256:$(curl -fsS "${accept[@]}" \
+              "${registry}/$1/manifests/$2" | sha256sum | cut -d' ' -f1)"
+          }
+          busybox="${BUSYBOX#*@}"
+          alpine="${ALPINE#*@}"
 
+          [ "$(statuses "${VERIFY}")" = 'ready,ready' ] ||
+            fail "verify reported $(statuses "${VERIFY}")"
+          [ "$(jq length <<< "${VERIFY_LATEST}")" = 2 ] ||
+            fail "verify would move ${VERIFY_LATEST}"
+
+          [ "$(statuses "${FIRST}")" = 'promoted,promoted' ] ||
+            fail "first run reported $(statuses "${FIRST}")"
+          [ "${FIRST_COUNT}" = 2 ] || fail "promoted_count ${FIRST_COUNT}"
+          for pair in "busybox ${busybox}" "alpine ${alpine}"; do
+            read -r name pinned <<< "${pair}"
+            reported=$(jq -r --arg n "lf/${name}" \
+              '.[] | select(.name == $n) | .digest' <<< "${FIRST}")
+            [ "${reported}" = "${pinned}" ] ||
+              fail "${name}: reported ${reported}, staged ${pinned}"
+            for tag in 1.0.0 latest; do
+              head=$(head_digest "release/lf/${name}" "${tag}")
+              body=$(body_digest "release/lf/${name}" "${tag}")
+              [ "${head}" = "${pinned}" ] && [ "${body}" = "${pinned}" ] ||
+                fail "release/lf/${name}:${tag} is ${head} (${body})"
+            done
+            # Every platform manifest of the index came along.
+            count=$(curl -fsS "${accept[@]}" \
+              "${registry}/release/lf/${name}/manifests/${pinned}" \
+              | jq '.manifests | length')
+            for child in $(curl -fsS "${accept[@]}" \
+              "${registry}/release/lf/${name}/manifests/${pinned}" \
+              | jq -r '.manifests[].digest'); do
+              [ -n "$(head_digest "release/lf/${name}" "${child}")" ] ||
+                fail "release/lf/${name} lacks ${child}"
+            done
+            echo "${name}: index ${pinned} with ${count} manifests ✅"
+          done
+          [ "$(jq length <<< "${FIRST_LATEST}")" = 2 ] ||
+            fail "latest moved: ${FIRST_LATEST}"
+
+          [ "$(statuses "${AGAIN}")" = 'skipped,skipped' ] ||
+            fail "second run reported $(statuses "${AGAIN}")"
+          [ "${AGAIN_SKIPPED}" = 2 ] || fail "skipped_count ${AGAIN_SKIPPED}"
+
+          [ "${CHANGED}" = failure ] || fail "a changed source promoted"
+          [ "$(statuses "${CHANGED_PROMOTED}")" = 'conflict,skipped' ] ||
+            fail "changed source reported $(statuses "${CHANGED_PROMOTED}")"
+          [ "$(head_digest release/lf/busybox 1.0.0)" = "${busybox}" ] ||
+            fail "release/lf/busybox:1.0.0 changed"
+
+          [ "${MISSING}" = failure ] || fail "a missing source verified"
+          [ "$(statuses "${MISSING_PROMOTED}")" = 'missing' ] ||
+            fail "missing source reported $(statuses "${MISSING_PROMOTED}")"
+          [ -z "$(head_digest release/lf/ghost 1.0.0)" ] ||
+            fail "verify wrote a tag"
+
+          [ "$(statuses "${DRY}")" = 'planned,planned' ] ||
+            fail "dry run reported $(statuses "${DRY}")"
+          [ "${DRY_ENDPOINT}" = 'nexus3.onap.org:10002' ] ||
+            fail "push_endpoint ${DRY_ENDPOINT}"
+          echo "Promotion validated ✅"
+
+  ### Logging in to a registry that needs credentials ###
+  login:
+    name: "Promote (authenticated registry)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
       # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
-        uses: $/
-        id: failure
-        continue-on-error: true
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
-          invalid_input: "Some garbage"
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
 
-      # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Start a registry needing a login"
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
-          exit 1
+          # Start a registry needing a login
+          set -euo pipefail
+          password=$(openssl rand -hex 16)
+          echo "::add-mask::${password}"
+          mkdir -p "${RUNNER_TEMP}/auth"
+          httpd="httpd@sha256:3440c39d8d6f54fa9ad2549e5a60c19ddd435faadc29c1ad"
+          httpd="${httpd}28aa795f71888889"
+          registry="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d58"
+          registry="${registry}95b6a58ace528858a7b332415373"
+          docker run --rm -i --entrypoint htpasswd "${httpd}" \
+            -niB promoter <<< "${password}" > "${RUNNER_TEMP}/auth/htpasswd"
+          docker run -d --name auth-registry -p 5001:5000 \
+            -v "${RUNNER_TEMP}/auth:/auth" \
+            -e REGISTRY_AUTH=htpasswd \
+            -e REGISTRY_AUTH_HTPASSWD_REALM=promote \
+            -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+            "${registry}"
+          for _ in $(seq 30); do
+            curl -s -o /dev/null http://localhost:5001/v2/ && break
+            sleep 1
+          done
+          docker login localhost:5001 -u promoter --password-stdin \
+            <<< "${password}"
+          docker buildx imagetools create \
+            -t localhost:5001/staging/app:1.0.0-s "${BUSYBOX}"
+          docker logout localhost:5001
+          # Not a step output: the runner drops outputs holding a mask.
+          echo "PROMOTE_PASSWORD=${password}" >> "$GITHUB_ENV"
+
+      - name: "Promote without credentials (must fail)"
+        id: anonymous
+        continue-on-error: true
+        uses: $/
+        with:
+          containers_json: '[{"name":"app","version":"1.0.0-s"}]'
+          release_tag: '1.0.0'
+          pull_registry: localhost:5001/staging
+          push_registry: localhost:5001/release
+
+      - name: "Promote with credentials"
+        id: login
+        uses: $/
+        with:
+          containers_json: '[{"name":"app","version":"1.0.0-s"}]'
+          release_tag: '1.0.0'
+          pull_registry: localhost:5001/staging
+          push_registry: localhost:5001/release
+          registry_user: promoter
+          registry_password: ${{ env.PROMOTE_PASSWORD }}
+
+      - name: "Validate the login stayed private"
+        shell: bash
+        env:
+          ANONYMOUS: ${{ steps.anonymous.outcome }}
+          ANONYMOUS_PROMOTED: ${{ steps.anonymous.outputs.promoted }}
+          PROMOTED: ${{ steps.login.outputs.promoted }}
+        run: |
+          # Validate the login stayed private
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [ "${ANONYMOUS}" = failure ] || fail "promoted without credentials"
+          # UNAUTHORIZED is an error, never an absent tag.
+          [ "$(jq -r '.[0].status' <<< "${ANONYMOUS_PROMOTED}")" = failed ] ||
+            fail "anonymous run reported ${ANONYMOUS_PROMOTED}"
+          [ "$(jq -r '.[0].status' <<< "${PROMOTED}")" = promoted ] ||
+            fail "credentialed run reported ${PROMOTED}"
+          [ "$(jq -r '.[0].digest' <<< "${PROMOTED}")" = "${BUSYBOX#*@}" ] ||
+            fail "digest changed: ${PROMOTED}"
+          # The credential never reached the runner's docker config.
+          if [ -f ~/.docker/config.json ] &&
+            jq -e '.auths | has("localhost:5001")' ~/.docker/config.json \
+              > /dev/null; then
+            fail "the action left a login in ~/.docker/config.json"
+          fi
+          echo "Login validated ✅"
+          docker rm -f auth-registry > /dev/null

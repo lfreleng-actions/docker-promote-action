@@ -1,53 +1,165 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+# docker-promote-action
+#
+# Promotes staged container images to a release registry, registry
+# side: each <pull_registry>/<name>:<version> copies to
+# <push_registry>/<name>:<release_tag> by digest, so multi-architecture
+# manifest lists keep their digests (docker-workflows#30).
+#
+# Input names follow the docker-workflows merge lane's release-publish
+# job, so its "Promote staged images" step swaps for this action one
+# for one. tests/test_equivalence.py proves the registry each leaves
+# behind is the same, apart from three deliberate differences listed
+# there: a release tag holding other bits is refused, a missing staged
+# image is found before anything is written, and an existing identical
+# release is skipped.
+name: "🐳 Docker Promote"
+description: >
+  Promote staged container images to a release registry by digest,
+  skipping releases already made and refusing to change a release tag.
 
 inputs:
-  input:
-    description: "Description of input"
+  # --- What to promote ----------------------------------------------
+  containers_json:
+    description: >
+      JSON array of {name, version} objects, as docker-workflows'
+      check-release job emits from a container release file: each
+      staged <pull_registry>/<name>:<version> promotes to
+      <push_registry>/<name>:<release_tag>. Names are repository paths
+      below the registry base (onap/app); names must be unique.
     required: true
+  release_tag:
+    description: >
+      The tag every image is released under (the release file's
+      container_release_tag). Release tags are treated as immutable,
+      so 'latest' is refused; see push_latest.
+    required: true
+  pull_registry:
+    description: >
+      Registry base the staged images are read from: host[:port] with
+      an optional repository path, such as nexus3.onap.org:10003 or
+      acme.jfrog.io/docker-snapshot.
+    required: true
+  push_registry:
+    description: >
+      Registry base the release is written to, in the same form, such
+      as nexus3.onap.org:10002 or acme.jfrog.io/docker-release.
+    required: true
+  push_latest:
+    description: >
+      Also point each image's 'latest' tag at its release digest, once
+      every image has been released.
+    required: false
+    default: "false"
+
+  # --- How --------------------------------------------------------------
+  mode:
+    description: >
+      'promote' checks every source and destination, then copies.
+      'verify' performs the same checks and writes nothing: it fails on
+      a missing staged image or a release tag holding other bits, so a
+      verify lane can catch either before the release file merges. With
+      on_conflict 'overwrite', verify predicts that run instead: a
+      release tag holding other bits warns and reports 'ready'.
+    required: false
+    default: "promote"
+  dry_run:
+    description: >
+      Print the promotion plan without contacting any registry: no
+      download, no login, no reads. The merge lane's dry-run self-test
+      uses it with hosts that hold none of the images.
+    required: false
+    default: "false"
+  on_conflict:
+    description: >
+      What to do when a release tag already exists with a different
+      digest. 'fail' refuses before anything is written; 'overwrite'
+      replaces it with a warning, as the lane's crane copy did. The
+      same digest is always skipped as already released.
+    required: false
+    default: "fail"
+
+  # --- Registry access ------------------------------------------------
+  registry_user:
+    description: >
+      Username to log in with, alongside registry_password. Leave both
+      empty to use the runner's existing logins (docker/login-action).
+    required: false
+    default: ""
+  registry_password:
+    description: >
+      Password or token for registry_user. The action logs in to the
+      login endpoint (host[:port]) of each registry base, in a private
+      docker config removed when the step ends.
+    required: false
+    default: ""
+  install_crane:
+    description: >
+      Download the pinned crane release and check it against its
+      recorded SHA-256. Set false to use a crane already on PATH.
+    required: false
+    default: "true"
+  summary:
+    description: "Write a promotion report to the step summary"
+    required: false
+    default: "true"
 
 outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  promoted:
+    description: >
+      JSON list, one entry per container: {name, source, destination,
+      image, digest, status}. digest is the registry's digest for the
+      staged image; for status promoted or skipped the release tag
+      holds it too, so image@digest is the subject to sign.
+    value: ${{ steps.promote.outputs.promoted }}
+  promoted_count:
+    description: "Number of images copied by this run"
+    value: ${{ steps.promote.outputs.promoted_count }}
+  skipped_count:
+    description: "Number of images already released with the same digest"
+    value: ${{ steps.promote.outputs.skipped_count }}
+  latest:
+    description: >
+      JSON list of the <image>:latest references moved (or, for verify
+      and dry runs, that would move)
+    value: ${{ steps.promote.outputs.latest }}
+  pull_endpoint:
+    description: "Login endpoint (host[:port]) of pull_registry"
+    value: ${{ steps.promote.outputs.pull_endpoint }}
+  push_endpoint:
+    description: "Login endpoint (host[:port]) of push_registry"
+    value: ${{ steps.promote.outputs.push_endpoint }}
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: "Promote images"
+      id: promote
       shell: bash
       env:
-        INPUT_VALUE: ${{ inputs.input }}
+        INPUT_CONTAINERS_JSON: ${{ inputs.containers_json }}
+        INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        INPUT_PULL_REGISTRY: ${{ inputs.pull_registry }}
+        INPUT_PUSH_REGISTRY: ${{ inputs.push_registry }}
+        INPUT_PUSH_LATEST: ${{ inputs.push_latest }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        INPUT_ON_CONFLICT: ${{ inputs.on_conflict }}
+        INPUT_REGISTRY_USER: ${{ inputs.registry_user }}
+        INPUT_REGISTRY_PASSWORD: ${{ inputs.registry_password }}
+        INPUT_INSTALL_CRANE: ${{ inputs.install_crane }}
+        INPUT_SUMMARY: ${{ inputs.summary }}
       run: |
-        # Friendly Name
-        input="$INPUT_VALUE"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
+        # Promote images
+        # Standard library only, so no setup-python step: GitHub-hosted
+        # runners ship a suitable python3. -I (isolated mode) keeps the
+        # caller's checkout off sys.path; see entrypoint.py.
+        if ! python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
+          > /dev/null 2>&1; then
+          echo "::error::python3 3.10 or later is required on the runner"
           exit 1
         fi
-
-        # Write the output using the multiline heredoc format with a random
-        # delimiter so that an input containing newlines cannot inject
-        # additional keys into $GITHUB_OUTPUT (output-file injection). The
-        # delimiter is built from shell-builtin randomness (no external
-        # tools such as openssl/uuidgen, which are not guaranteed on
-        # self-hosted runners) and regenerated until it is provably absent
-        # from the value being emitted.
-        delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-        while [[ "$input" == *"$delimiter"* ]]; do
-          delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-        done
-        {
-          printf '%s<<%s\n' 'output' "$delimiter"
-          printf '%s\n' "$input"
-          printf '%s\n' "$delimiter"
-        } >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+        python3 -I "${GITHUB_ACTION_PATH}/entrypoint.py"

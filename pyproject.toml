@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+[project]
+name = "docker-promote-action"
+version = "0.0.0"
+description = "Promote staged container images to a release registry by digest"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+# Standard library only: the composite action runs on the runner's own
+# python3 with no install step.
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+
+[tool.basedpyright]
+# Standard mode keeps error-level type checking without the strict-only
+# warnings that fire throughout on parsed JSON, whose shape is dynamic.
+typeCheckingMode = "standard"
+# The basedpyright pre-commit mirror bundles its own runtime and cannot
+# carry project dependencies; mypy performs the import-aware checking.
+reportMissingImports = false
+reportMissingModuleSource = false
