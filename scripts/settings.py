@@ -121,6 +121,17 @@ def _base(name: str, raw: str) -> str:
     return base
 
 
+def _namespace(raw: str) -> str:
+    namespace = raw.strip()
+    if namespace and not PATH.fullmatch(namespace):
+        raise ActionError(
+            f"namespace '{namespace}' is not a repository path (lowercase "
+            "alphanumeric runs joined by '.', '_', '__' or '-', in '/'-separated "
+            "parts, with no leading, trailing or doubled '/')"
+        )
+    return namespace
+
+
 def _choice(name: str, raw: str, choices: tuple[str, ...]) -> str:
     value = raw.strip() or choices[0]
     if value not in choices:
@@ -136,6 +147,7 @@ class Settings:
     release_tag: str
     pull_registry: str
     push_registry: str
+    namespace: str = ""
     push_latest: bool = False
     dry_run: bool = False
     mode: str = "promote"
@@ -164,6 +176,13 @@ class Settings:
         """Whether the run may change registry state."""
         return not self.dry_run and self.mode == "promote"
 
+    def double_prefixed(self) -> list[Container]:
+        """Containers whose release-file name already starts with the namespace."""
+        if not self.namespace:
+            return []
+        prefix = f"{self.namespace}/"
+        return [c for c in self.containers if c.name.startswith(prefix)]
+
     @classmethod
     def from_env(cls) -> Settings:
         """Read and cross-check the INPUT_* variables."""
@@ -182,10 +201,14 @@ class Settings:
             )
         pull = _base("pull_registry", env("INPUT_PULL_REGISTRY"))
         push = _base("push_registry", env("INPUT_PUSH_REGISTRY"))
+        namespace = _namespace(env("INPUT_NAMESPACE"))
         containers = []
         for name, version in parse_containers(env("INPUT_CONTAINERS_JSON")):
-            image = f"{push}/{name}"
-            for repository in (f"{pull}/{name}", image):
+            # Release-file names are relative to the namespace, as in
+            # global-jjb's release-job.sh.
+            relative = f"{namespace}/{name}" if namespace else name
+            image = f"{push}/{relative}"
+            for repository in (f"{pull}/{relative}", image):
                 path = repository.split("/", 1)[1]
                 if len(path) > MAX_PATH:
                     raise ActionError(
@@ -197,7 +220,7 @@ class Settings:
                 Container(
                     name=name,
                     version=version,
-                    source=f"{pull}/{name}:{version}",
+                    source=f"{pull}/{relative}:{version}",
                     destination=f"{image}:{release_tag}",
                     image=image,
                 )
@@ -207,6 +230,7 @@ class Settings:
             release_tag=release_tag,
             pull_registry=pull,
             push_registry=push,
+            namespace=namespace,
             push_latest=gha.env_bool("INPUT_PUSH_LATEST", "push_latest", False),
             dry_run=gha.env_bool("INPUT_DRY_RUN", "dry_run", False),
             mode=_choice("mode", env("INPUT_MODE"), MODES),
