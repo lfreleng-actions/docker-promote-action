@@ -90,6 +90,14 @@ class Promotion:
                 "registry), so there is nothing to copy and it counts as released; "
                 "check the release file if a staged build was meant",
             )
+        for container in self.settings.double_prefixed():
+            gha.annotate(
+                "notice",
+                f"{container.name} already starts with namespace "
+                f"'{self.settings.namespace}', so it resolves to {container.image}, "
+                "probably double-prefixed: release-file names are relative to the "
+                "namespace",
+            )
         if self.settings.dry_run:
             self._plan()
             return True

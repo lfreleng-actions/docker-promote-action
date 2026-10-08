@@ -95,6 +95,7 @@ jobs:
 | release_tag       | True     |           | Tag every image releases under; `latest` refused (see push_latest)                                                          |
 | pull_registry     | True     |           | Registry base staged images come from: `host[:port]` with an optional repository path                                       |
 | push_registry     | True     |           | Registry base the release goes to, in the same form                                                                         |
+| namespace         | False    |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)            |
 | push_latest       | False    | `false`   | Also point each image's `latest` at its release digest, after every image has released                                      |
 | mode              | False    | `promote` | `promote`, or `verify`: read every source and destination, write nothing                                                    |
 | dry_run           | False    | `false`   | Print the plan without contacting any registry                                                                              |
@@ -210,6 +211,32 @@ base's `host[:port]` alone, computed as the lanes compute it
 Image references use the base; logins use the endpoint, published as
 `pull_endpoint` and `push_endpoint` for callers that log in
 themselves.
+
+### Namespace
+
+`namespace` sits between each registry base and the release-file name
+on both sides: `<pull_registry>/<namespace>/<name>:<version>` promotes
+to `<push_registry>/<namespace>/<name>:<release_tag>`, and `latest`
+likewise. This matches the Jenkins container release job: global-jjb's
+`shell/release-job.sh` derives the namespace from the Gerrit host
+(`gerrit.onap.org` gives `onap`) and pulls
+`$CONTAINER_PULL_REGISTRY/$lfn_umbrella/$name:$version` and pushes
+`$CONTAINER_PUSH_REGISTRY/$lfn_umbrella/$name:$VERSION`. Release files
+written for that job name containers relative to the namespace:
+`so/sdnc-adapter` releases as `onap/so/sdnc-adapter`.
+
+The namespace is a repository path: one or more `/`-separated
+components of the grammar container names use, with no leading,
+trailing or doubled `/`. It applies to every mode, to the `source`,
+`destination` and `image` of each `promoted` entry, to the step
+summary, to conflict, skip and same-reference detection, and to the
+255-character repository path limit. Each entry's `name` stays as the
+release file gives it. Empty, the default, adds no prefix.
+
+The action never strips a prefix. A name that already starts with
+`<namespace>/` stays as given, so `onap/app` with namespace `onap`
+resolves to `onap/onap/app`, and the action emits a `::notice::` that
+the name is probably double-prefixed.
 
 A base must start with a registry host: a `.` or `:` in its first
 component, or `localhost`. Anything else, such as `myregistry/team`,

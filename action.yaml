@@ -48,6 +48,17 @@ inputs:
       Registry base the release is written to, in the same form, such
       as nexus3.onap.org:10002 or acme.jfrog.io/docker-release.
     required: true
+  namespace:
+    description: >
+      Repository path placed between each registry base and container
+      name on both sides: <pull_registry>/<namespace>/<name>:<version>
+      promotes to <push_registry>/<namespace>/<name>:<release_tag>, as
+      global-jjb's container release job applies its project namespace
+      (onap for gerrit.onap.org). Release-file names are then relative
+      to it (so/sdnc-adapter); a name already starting with the
+      namespace is kept as given, with a notice. Empty adds no prefix.
+    required: false
+    default: ""
   push_latest:
     description: >
       Also point each image's 'latest' tag at its release digest, once
@@ -144,6 +155,7 @@ runs:
         INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         INPUT_PULL_REGISTRY: ${{ inputs.pull_registry }}
         INPUT_PUSH_REGISTRY: ${{ inputs.push_registry }}
+        INPUT_NAMESPACE: ${{ inputs.namespace }}
         INPUT_PUSH_LATEST: ${{ inputs.push_latest }}
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_DRY_RUN: ${{ inputs.dry_run }}

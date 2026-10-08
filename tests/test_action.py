@@ -601,6 +601,171 @@ class SameReferenceTest(SandboxTestCase):
                 self.assertEqual("same reference" in run.summary, same)
 
 
+class NamespaceTest(SandboxTestCase):
+    """namespace prefixes both sides, as global-jjb's lfn_umbrella does."""
+
+    def notices(self, run: Any, text: str) -> list[str]:
+        return [a for a in run.annotations if a.startswith("::notice::") and text in a]
+
+    def test_promotes_below_the_namespace_on_both_sides(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/onap/so/adapter:1-s", "adapter")
+        run = run_action(
+            self.sandbox,
+            **inputs(("so/adapter", "1-s"), namespace="onap", push_latest="true"),
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(
+            run.mutations,
+            [
+                [
+                    "copy",
+                    "--no-clobber",
+                    f"{PULL}/onap/so/adapter@{staged}",
+                    f"{PUSH}/onap/so/adapter:1.0.0",
+                ],
+                ["tag", f"{PUSH}/onap/so/adapter@{staged}", "latest"],
+            ],
+        )
+        self.assertEqual(
+            run.json("promoted"),
+            [
+                {
+                    "name": "so/adapter",
+                    "source": f"{PULL}/onap/so/adapter:1-s",
+                    "destination": f"{PUSH}/onap/so/adapter:1.0.0",
+                    "image": f"{PUSH}/onap/so/adapter",
+                    "digest": staged,
+                    "status": "promoted",
+                }
+            ],
+        )
+        self.assertEqual(run.json("latest"), [f"{PUSH}/onap/so/adapter:latest"])
+        self.assertIn(
+            f"| so/adapter | {PULL}/onap/so/adapter:1-s | "
+            f"{PUSH}/onap/so/adapter:1.0.0 |",
+            run.summary,
+        )
+        self.assertEqual(self.notices(run, "namespace"), [])
+
+    def test_registry_base_paths_dry_run(self) -> None:
+        pull, push = "acme.jfrog.io/docker-snapshot", "acme.jfrog.io/docker-release"
+        run = run_action(
+            self.sandbox,
+            **inputs(
+                ("app", "1-s"),
+                namespace="onap/sub",
+                pull_registry=pull,
+                push_registry=push,
+                dry_run="true",
+                push_latest="true",
+            ),
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.calls, [])
+        entry = run.json("promoted")[0]
+        self.assertEqual(entry["source"], f"{pull}/onap/sub/app:1-s")
+        self.assertEqual(entry["destination"], f"{push}/onap/sub/app:1.0.0")
+        self.assertEqual(entry["image"], f"{push}/onap/sub/app")
+        self.assertEqual(run.json("latest"), [f"{push}/onap/sub/app:latest"])
+        self.assertIn(f"- `{push}/onap/sub/app:1.0.0`", run.summary)
+        self.assertEqual(run.outputs["push_endpoint"], "acme.jfrog.io")
+
+    def test_verify_reads_below_the_namespace(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/onap/app:1-s", "app")
+        run = run_action(self.sandbox, **inputs(namespace="onap", mode="verify"))
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.mutations, [])
+        self.assertEqual(statuses(run), ["ready"])
+        self.assertEqual(run.json("promoted")[0]["digest"], staged)
+        # Without the namespace the same staging is not found.
+        bare = run_action(self.sandbox, **inputs(mode="verify"))
+        self.assertEqual(statuses(bare), ["missing"])
+
+    def test_conflict_below_the_namespace(self) -> None:
+        self.sandbox.stage(f"{PULL}/onap/app:1-s", "new")
+        released = self.sandbox.stage(f"{PUSH}/onap/app:1.0.0", "old")
+        # The same tag outside the namespace is another repository.
+        self.sandbox.stage(f"{PUSH}/app:1.0.0", "new")
+        run = run_action(self.sandbox, **inputs(namespace="onap"))
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.mutations, [])
+        self.assertEqual(statuses(run), ["conflict"])
+        self.assertEqual(run.tags[f"{PUSH}/onap/app:1.0.0"], released)
+
+    def test_skip_below_the_namespace(self) -> None:
+        self.sandbox.stage(f"{PULL}/onap/app:1-s", "app")
+        self.sandbox.stage(f"{PUSH}/onap/app:1.0.0", "app")
+        run = run_action(self.sandbox, **inputs(namespace="onap"))
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.mutations, [])
+        self.assertEqual(statuses(run), ["skipped"])
+
+    def test_same_reference_below_the_namespace(self) -> None:
+        run = run_action(
+            self.sandbox,
+            **inputs(
+                ("app", "1.0.0"), namespace="onap", pull_registry=PUSH, dry_run="true"
+            ),
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        same = self.notices(run, "same reference")
+        self.assertEqual(len(same), 1, run.annotations)
+        self.assertIn(f"{PUSH}/onap/app:1.0.0", same[0])
+        self.assertIn(f"- `app`: `{PUSH}/onap/app:1.0.0`", run.summary)
+
+    def test_double_prefix_kept_with_a_notice(self) -> None:
+        run = run_action(
+            self.sandbox,
+            **inputs(
+                ("onap/app", "1-s"),
+                ("onapx/b", "1-s"),
+                ("onap", "1-s"),
+                namespace="onap",
+                dry_run="true",
+            ),
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        destinations = [e["destination"] for e in run.json("promoted")]
+        self.assertEqual(
+            destinations,
+            [
+                f"{PUSH}/onap/onap/app:1.0.0",
+                f"{PUSH}/onap/onapx/b:1.0.0",
+                f"{PUSH}/onap/onap:1.0.0",
+            ],
+        )
+        notices = self.notices(run, "double-prefixed")
+        self.assertEqual(len(notices), 1, run.annotations)
+        self.assertIn("onap/app", notices[0])
+        self.assertIn(f"{PUSH}/onap/onap/app", notices[0])
+        self.assertIn("relative to the namespace", notices[0])
+
+    def test_invalid_namespaces_refused(self) -> None:
+        for namespace in ("/onap", "onap/", "onap//so", "ONAP", "on ap", "-onap", "/"):
+            with self.subTest(namespace=namespace):
+                run = run_action(self.sandbox, **inputs(namespace=namespace))
+                self.assertEqual(run.status, 1, run.stdout)
+                self.assertEqual(run.calls, [])
+                errors = [a for a in run.annotations if a.startswith("::error::")]
+                self.assertEqual(len(errors), 1, run.annotations)
+                self.assertIn("namespace", errors[0])
+
+    def test_path_length_counts_the_namespace(self) -> None:
+        name = "a" * 250
+        ok = run_action(self.sandbox, **inputs((name, "1"), dry_run="true"))
+        self.assertEqual(ok.status, 0, ok.stdout)
+        run = run_action(
+            self.sandbox, **inputs((name, "1"), namespace="onap/x", dry_run="true")
+        )
+        self.assertEqual(run.status, 1, run.stdout)
+        self.assertIn("over Docker's limit of 255", run.stdout)
+
+    def test_blank_namespace_adds_nothing(self) -> None:
+        run = run_action(self.sandbox, **inputs(namespace=" ", dry_run="true"))
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.json("promoted")[0]["source"], f"{PULL}/app:1-s")
+
+
 class LoginTest(SandboxTestCase):
     """Credentials reach crane only, for this step only."""
 
