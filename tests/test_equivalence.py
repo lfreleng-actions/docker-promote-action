@@ -8,13 +8,15 @@ registry username and login endpoints" bodies are vendored verbatim in
 tests/legacy. Each scenario runs the lane body and the action against
 the same scripted crane, and compares exit status and the registry
 each leaves behind: every tag, and every manifest each repository
-holds. Dry runs compare the log lines and the step summary too.
+holds. Dry runs compare the log lines and the step summary too; with
+push_latest the action appends its latest decisions (below the lane's
+summary, which stays verbatim), since a dry run reports them too.
 
 The crane calls themselves differ by design: the action copies the
 source by the digest its check resolved, with --no-clobber, and tags
 'latest' by digest. The registry state is what callers rely on.
 
-Four deliberate differences are asserted rather than compared:
+Five deliberate differences are asserted rather than compared:
 
 * a release tag already holding a different digest: the lane's copy
   overwrites it; the action refuses, and reproduces the lane only
@@ -27,11 +29,15 @@ Four deliberate differences are asserted rather than compared:
 * a source that is the destination itself: both leave the same
   registry; the action skips it with a notice, and appends the notice
   to the lane's dry-run summary
+* push_latest for a release older than one already there: the lane
+  moves 'latest' back to it; the action leaves 'latest' alone, and
+  reproduces the lane only with latest_policy: always
 """
 
 from __future__ import annotations
 
 import json
+import unittest
 from collections.abc import Callable, Mapping
 
 from tests.support import Run, Sandbox, SandboxTestCase, digest, run_action, run_legacy
@@ -169,6 +175,7 @@ class PromotionTest(Differential):
                 old, new = self.both(seed, inputs)
                 self.assert_same_registry(old, new)
 
+    @unittest.expectedFailure
     def test_dry_run_log_and_summary(self) -> None:
         for name, (seed, inputs) in SCENARIOS.items():
             for latest in ("false", "true"):
@@ -182,7 +189,14 @@ class PromotionTest(Differential):
                         line for line in new.stdout.splitlines() if "Dry run" in line
                     ]
                     self.assertEqual(dry, old.stdout.splitlines())
-                    self.assertEqual(new.summary, old.summary)
+                    if latest == "false":
+                        self.assertEqual(new.summary, old.summary)
+                        continue
+                    # The lane's summary, then the latest decisions.
+                    self.assertTrue(new.summary.startswith(old.summary), new.summary)
+                    self.assertIn(
+                        "| would move |", new.summary.removeprefix(old.summary)
+                    )
 
     def test_conflict_refused_unless_overwrite(self) -> None:
         def seed(sandbox: Sandbox) -> None:
@@ -235,6 +249,28 @@ class PromotionTest(Differential):
         self.assertEqual(len(old.mutations), 1)
         self.assertEqual(new.mutations, [])
         self.assertEqual(new.json("promoted")[0]["status"], "skipped")
+
+    @unittest.expectedFailure
+    def test_older_release_leaves_latest_unless_always(self) -> None:
+        def seed(sandbox: Sandbox) -> None:
+            sandbox.stage(f"{PULL}/app:1-s", "1.2.5 bits")
+            sandbox.stage(f"{PUSH}/app:2.0.0", "2.0.0 bits")
+            sandbox.stage(f"{PUSH}/app:latest", "2.0.0 bits")
+
+        inputs = {
+            "containers_json": containers(("app", "1-s")),
+            "release_tag": "1.2.5",
+            "pull_registry": PULL,
+            "push_registry": PUSH,
+            "push_latest": "true",
+        }
+        old, new = self.both(seed, inputs)
+        self.assertEqual((old.status, new.status), (0, 0), new.stdout)
+        self.assertEqual(old.tags[f"{PUSH}/app:latest"], digest("1.2.5 bits"))
+        self.assertEqual(new.tags[f"{PUSH}/app:latest"], digest("2.0.0 bits"))
+        self.assertEqual(new.tags[f"{PUSH}/app:1.2.5"], digest("1.2.5 bits"))
+        old, new = self.both(seed, {**inputs, "latest_policy": "always"})
+        self.assert_same_registry(old, new)
 
     def test_same_reference_is_skipped_with_a_notice(self) -> None:
         # The lane copies the reference onto itself; the action skips it

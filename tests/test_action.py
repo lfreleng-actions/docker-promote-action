@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -47,6 +48,19 @@ def inputs(*pairs: tuple[str, str], **extra: str) -> dict[str, str]:
 
 def statuses(run: Any) -> list[str]:
     return [entry["status"] for entry in run.json("promoted")]
+
+
+def listings(run: Any) -> list[list[str]]:
+    """The crane ls calls a run made."""
+    return [call for call in run.calls if call[:1] == ["ls"]]
+
+
+def decided(run: Any) -> list[tuple[str, str, bool, bool]]:
+    """(image, highest, move, moved) of each latest decision."""
+    return [
+        (entry["image"], entry["highest"], entry["move"], entry["moved"])
+        for entry in run.json("latest_decisions")
+    ]
 
 
 class ValidationTest(SandboxTestCase):
@@ -524,6 +538,478 @@ class DryRunTest(SandboxTestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(promote.main(), 0)
+
+
+class VersionTest(unittest.TestCase):
+    """The latest rule itself: SemVer precedence over registry tags."""
+
+    @unittest.expectedFailure
+    def test_decide(self) -> None:
+        latest = importlib.import_module("scripts.latest")
+        noise = [
+            "latest",
+            "2.1-STAGING-latest",
+            f"sha256-{'0' * 64}.sig",
+            "3.0.0-20260101T000000Z",
+            "99.0.0-rc1",
+            "01.0.0",
+            "1.2",
+            "v3",
+            "9.0.0-01",
+        ]
+        cases = [
+            # (candidate, existing tags, move, highest)
+            ("1.0.0", [], True, ""),
+            ("2.0.1", ["2.0.0", "latest"], True, "2.0.0"),
+            ("1.2.5", ["2.0.0", "1.2.4"], False, "2.0.0"),
+            ("2.0.0", ["2.0.0", "2.0.1"], False, "2.0.1"),
+            ("2.0.1", ["2.0.0", "2.0.1"], True, "2.0.1"),
+            ("1.10.0", ["1.9.0"], True, "1.9.0"),
+            ("1.9.0", ["1.10.0"], False, "1.10.0"),
+            # Build metadata, in Docker's '_' form or SemVer's '+'.
+            ("1.2.3_build.5", ["1.2.3"], True, "1.2.3"),
+            ("1.2.3", ["1.2.3_build.5"], True, "1.2.3_build.5"),
+            ("1.2.3+build.5", ["1.2.4"], False, "1.2.4"),
+            ("1.2.3", ["1.2.4_build.1"], False, "1.2.4_build.1"),
+            # Registries carrying a 'v' on their version tags.
+            ("1.2.5", ["v2.0.0"], False, "v2.0.0"),
+            ("v2.0.1", ["2.0.0"], True, "2.0.0"),
+            # Nothing but noise: no release version there yet.
+            ("2.0.1", noise, True, ""),
+            ("0.0.1", [*noise, "0.0.0"], True, "0.0.0"),
+            # Pre-releases and other non-releases never move latest.
+            ("3.0.0-rc1", ["2.0.1"], False, ""),
+            ("3.0.0-rc1", [], False, ""),
+            ("1.0.0-20260101T000000Z", [], False, ""),
+            ("nightly", [], False, ""),
+            ("1.2", [], False, ""),
+            ("01.2.3", [], False, ""),
+        ]
+        for candidate, tags, move, highest in cases:
+            with self.subTest(candidate=candidate, tags=tags):
+                decision = latest.decide(candidate, tags)
+                self.assertEqual((decision.move, decision.highest), (move, highest))
+                self.assertTrue(decision.reason)
+
+    @unittest.expectedFailure
+    def test_is_release(self) -> None:
+        latest = importlib.import_module("scripts.latest")
+        for tag in ("1.0.0", "v1.0.0", "0.0.0", "1.2.3_b.1", "1.2.3+b-1.x"):
+            with self.subTest(tag=tag):
+                self.assertTrue(latest.is_release(tag))
+        for tag in ("1.0.0-rc1", "1.0", "latest", "1.0.0-", "1.0.0_", "V1.0.0"):
+            with self.subTest(tag=tag):
+                self.assertFalse(latest.is_release(tag))
+
+
+def history(sandbox: Any, name: str, *tags: str, latest: str = "") -> None:
+    """Earlier releases of ``name`` on PUSH, each its own image."""
+    for tag in tags:
+        sandbox.stage(f"{PUSH}/{name}:{tag}", f"{name} {tag}")
+    if latest:
+        sandbox.stage(f"{PUSH}/{name}:latest", f"{name} {latest}")
+
+
+class LatestPolicyTest(SandboxTestCase):
+    """latest moves only to the highest release (docker-workflows#115)."""
+
+    def release(self, tag: str, *names: str, **extra: str) -> Any:
+        pairs = tuple((name, "1-s") for name in names or ("app",))
+        return run_action(
+            self.sandbox, **inputs(*pairs, release_tag=tag, push_latest="true", **extra)
+        )
+
+    @unittest.expectedFailure
+    def test_first_release_moves(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        run = self.release("1.0.0")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
+        # Listed in the check, then again just before latest moves.
+        self.assertEqual(listings(run), [["ls", f"{PUSH}/app"]] * 2)
+        self.assertEqual(
+            run.json("latest_decisions"),
+            [
+                {
+                    "image": f"{PUSH}/app",
+                    "digest": staged,
+                    "candidate": "1.0.0",
+                    "highest": "",
+                    "move": True,
+                    "moved": True,
+                    "reason": "no release version there yet",
+                }
+            ],
+        )
+        self.assertEqual(run.json("latest"), [f"{PUSH}/app:latest"])
+
+    @unittest.expectedFailure
+    def test_newer_release_moves(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "2.0.0", latest="2.0.0")
+        run = self.release("2.0.1")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", True, True)])
+        self.assertIn("| moved |", run.summary)
+
+    @unittest.expectedFailure
+    def test_older_release_does_not_move(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "2.0.0", latest="2.0.0")
+        run = self.release("1.2.5")
+        self.assertEqual(run.status, 0, run.stdout)
+        # The release itself still publishes; only latest stays.
+        self.assertEqual(statuses(run), ["promoted"])
+        self.assertEqual(run.tags[f"{PUSH}/app:1.2.5"], staged)
+        self.assertEqual([call[0] for call in run.mutations], ["copy"])
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 2.0.0"))
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", False, False)])
+        self.assertEqual(run.json("latest"), [])
+        self.assertIn("| stays |", run.summary)
+        self.assertIn("2.0.0", run.json("latest_decisions")[0]["reason"])
+
+    @unittest.expectedFailure
+    def test_concurrent_higher_release_stops_the_move(self) -> None:
+        # Another run releases 2.0.0 between this run's check and its
+        # move: latest must not then move back to 1.2.5.
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "1.2.4", latest="1.2.4")
+        newer = {f"{PUSH}/app:2.0.0": digest("app 2.0.0")}
+        self.sandbox.seed(after_ls={f"{PUSH}/app": newer})
+        run = self.release("1.2.5")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(statuses(run), ["promoted"])
+        self.assertEqual(run.tags[f"{PUSH}/app:1.2.5"], staged)
+        self.assertEqual([call[0] for call in run.mutations], ["copy"])
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 1.2.4"))
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", False, False)])
+        self.assertEqual(run.json("latest"), [])
+        self.assertIn("| stays |", run.summary)
+
+    @unittest.expectedFailure
+    def test_rerun_of_an_older_release_does_not_move(self) -> None:
+        # The docker-workflows#112 case: an old release re-detected.
+        self.sandbox.stage(f"{PULL}/app:1-s", "app 2.0.0")
+        history(self.sandbox, "app", "2.0.0", "2.0.1", latest="2.0.1")
+        run = self.release("2.0.0")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(statuses(run), ["skipped"])
+        self.assertEqual(run.mutations, [])
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 2.0.1"))
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.1", False, False)])
+
+    @unittest.expectedFailure
+    def test_rerun_with_everything_skipped_converges(self) -> None:
+        # A 2.0.1 run that failed before latest moved: re-running it,
+        # every copy skipped, completes the release.
+        for name in ("a", "b"):
+            self.sandbox.stage(f"{PULL}/{name}:1-s", f"{name} 2.0.1")
+            history(self.sandbox, name, "2.0.0", "2.0.1", latest="2.0.0")
+        run = self.release("2.0.1", "a", "b")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(statuses(run), ["skipped", "skipped"])
+        self.assertEqual([call[0] for call in run.mutations], ["tag", "tag"])
+        for name in ("a", "b"):
+            self.assertEqual(run.tags[f"{PUSH}/{name}:latest"], digest(f"{name} 2.0.1"))
+        self.assertEqual(
+            decided(run),
+            [(f"{PUSH}/a", "2.0.1", True, True), (f"{PUSH}/b", "2.0.1", True, True)],
+        )
+
+    @unittest.expectedFailure
+    def test_pre_release_does_not_move(self) -> None:
+        self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "2.0.1", latest="2.0.1")
+        run = self.release("3.0.0-rc1")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(statuses(run), ["promoted"])
+        self.assertEqual([call[0] for call in run.mutations], ["copy"])
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 2.0.1"))
+        # A pre-release never moves latest, so there is nothing to compare.
+        self.assertEqual(listings(run), [])
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "", False, False)])
+        notices = [a for a in run.annotations if a.startswith("::notice::")]
+        self.assertTrue(any("pre-release" in n for n in notices), run.annotations)
+
+    @unittest.expectedFailure
+    def test_non_semver_tags_are_ignored(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(
+            self.sandbox,
+            "app",
+            "2.0.0",
+            "2.1-STAGING-latest",
+            f"sha256-{'a' * 64}.sig",
+            "3.0.0-20260101T000000Z",
+            "99.0.0-rc1",
+            "10.0",
+            "v-next",
+            latest="2.1-STAGING-latest",
+        )
+        run = self.release("2.0.1")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", True, True)])
+
+    @unittest.expectedFailure
+    def test_build_metadata_does_not_count(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "2.0.1_build.7", latest="2.0.1_build.7")
+        run = self.release("2.0.1")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.1_build.7", True, True)])
+
+    @unittest.expectedFailure
+    def test_each_image_compares_against_its_own_repository(self) -> None:
+        staged = {n: self.sandbox.stage(f"{PULL}/{n}:1-s", n) for n in ("a", "b")}
+        history(self.sandbox, "a", "2.0.0", latest="2.0.0")
+        run = self.release("1.5.0", "a", "b")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/a:latest"], digest("a 2.0.0"))
+        self.assertEqual(run.tags[f"{PUSH}/b:latest"], staged["b"])
+        self.assertEqual(run.json("latest"), [f"{PUSH}/b:latest"])
+        self.assertEqual(
+            decided(run),
+            [(f"{PUSH}/a", "2.0.0", False, False), (f"{PUSH}/b", "", True, True)],
+        )
+
+    @unittest.expectedFailure
+    def test_always_moves_regardless(self) -> None:
+        staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "2.0.0", latest="2.0.0")
+        run = self.release("1.2.5", latest_policy="always")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
+        self.assertEqual(listings(run), [])
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "", True, True)])
+        warnings = [a for a in run.annotations if a.startswith("::warning::")]
+        self.assertEqual(len(warnings), 1, run.annotations)
+        self.assertIn("latest_policy: always", warnings[0])
+
+    @unittest.expectedFailure
+    def test_unreadable_tag_list_fails_before_any_write(self) -> None:
+        self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        self.sandbox.seed(fail_ls={f"{PUSH}/app": UNAUTHORIZED})
+        run = self.release("1.0.0")
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.mutations, [])
+        self.assertNotIn(f"{PUSH}/app:1.0.0", run.tags)
+        errors = [a for a in run.annotations if a.startswith("::error::")]
+        self.assertEqual(len(errors), 1, run.annotations)
+        self.assertIn("UNAUTHORIZED", errors[0])
+
+    @unittest.expectedFailure
+    def test_without_push_latest_nothing_is_listed(self) -> None:
+        self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        run = run_action(self.sandbox, **inputs())
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(listings(run), [])
+        self.assertEqual(run.json("latest_decisions"), [])
+
+    @unittest.expectedFailure
+    def test_verify_reports_the_decision(self) -> None:
+        self.sandbox.stage(f"{PULL}/app:1-s", "app")
+        history(self.sandbox, "app", "2.0.0", latest="2.0.0")
+        older = self.release("1.2.5", mode="verify")
+        self.assertEqual(older.status, 0, older.stdout)
+        self.assertEqual(older.mutations, [])
+        self.assertEqual(older.json("latest"), [])
+        self.assertEqual(decided(older), [(f"{PUSH}/app", "2.0.0", False, False)])
+        self.assertIn("| stays |", older.summary)
+        newer = self.release("2.0.1", mode="verify")
+        self.assertEqual(newer.mutations, [])
+        self.assertEqual(newer.json("latest"), [f"{PUSH}/app:latest"])
+        self.assertEqual(decided(newer), [(f"{PUSH}/app", "2.0.0", True, False)])
+        self.assertIn("| would move |", newer.summary)
+
+    @unittest.expectedFailure
+    def test_dry_run_reports_what_it_can_offline(self) -> None:
+        run = self.release("2.0.1", dry_run="true")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(run.json("latest"), [f"{PUSH}/app:latest"])
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "", True, False)])
+        self.assertIn("not checked", run.json("latest_decisions")[0]["reason"])
+        self.assertIn("| would move |", run.summary)
+        pre = self.release("3.0.0-rc1", dry_run="true")
+        self.assertEqual(pre.calls, [])
+        self.assertEqual(pre.json("latest"), [])
+        self.assertEqual(decided(pre), [(f"{PUSH}/app", "", False, False)])
+        self.assertNotIn("as latest", pre.stdout)
+
+    @unittest.expectedFailure
+    def test_policy_validated(self) -> None:
+        run = self.release("1.0.0", latest_policy="newest")
+        self.assertEqual(run.status, 1, run.stdout)
+        self.assertEqual(run.calls, [])
+        errors = [a for a in run.annotations if a.startswith("::error::")]
+        self.assertEqual(len(errors), 1, run.annotations)
+        self.assertIn("latest_policy must be one of highest, always", errors[0])
+
+
+GHCR = "ghcr.io/lfreleng-actions/app"
+
+
+def pushed(*entries: tuple[str, str]) -> str:
+    """docker-workflows' build job 'pushed' output: {name, image, digest}."""
+    return json.dumps(
+        [{"name": "app", "image": image, "digest": value} for image, value in entries]
+    )
+
+
+class LatestModeTest(SandboxTestCase):
+    """mode: latest applies the rule alone, to already-pushed images."""
+
+    def latest(self, images: str, tag: str = "2.0.1", **extra: str) -> Any:
+        return run_action(
+            self.sandbox, mode="latest", images_json=images, release_tag=tag, **extra
+        )
+
+    def refused(self, message: str, **extra: str) -> None:
+        run = run_action(self.sandbox, **extra)
+        self.assertEqual(run.status, 1, run.stdout)
+        self.assertEqual(run.calls, [], "a registry was contacted")
+        errors = [a for a in run.annotations if a.startswith("::error::")]
+        self.assertEqual(len(errors), 1, run.annotations)
+        self.assertIn(message, errors[0])
+
+    @unittest.expectedFailure
+    def test_moves_each_image_to_the_highest_release(self) -> None:
+        history(self.sandbox, "app", "2.0.0", "2.0.1", latest="2.0.0")
+        ghcr = self.sandbox.stage(f"{GHCR}:2.0.1", "app 2.0.1")
+        run = self.latest(pushed((f"{PUSH}/app", digest("app 2.0.1")), (GHCR, ghcr)))
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(
+            run.mutations,
+            [
+                ["tag", f"{PUSH}/app@{digest('app 2.0.1')}", "latest"],
+                ["tag", f"{GHCR}@{ghcr}", "latest"],
+            ],
+        )
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 2.0.1"))
+        self.assertEqual(run.tags[f"{GHCR}:latest"], ghcr)
+        self.assertEqual(
+            decided(run),
+            [(f"{PUSH}/app", "2.0.1", True, True), (GHCR, "2.0.1", True, True)],
+        )
+        self.assertEqual(run.json("latest"), [f"{PUSH}/app:latest", f"{GHCR}:latest"])
+        self.assertEqual(run.json("promoted"), [])
+        self.assertIn("| moved |", run.summary)
+
+    @unittest.expectedFailure
+    def test_older_release_does_not_move(self) -> None:
+        history(self.sandbox, "app", "1.2.5", "2.0.0", latest="2.0.0")
+        run = self.latest(pushed((f"{PUSH}/app", digest("app 1.2.5"))), "1.2.5")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.mutations, [])
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 2.0.0"))
+        self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", False, False)])
+        self.assertIn("| stays |", run.summary)
+
+    @unittest.expectedFailure
+    def test_always_moves_regardless(self) -> None:
+        history(self.sandbox, "app", "1.2.5", "2.0.0", latest="2.0.0")
+        run = self.latest(
+            pushed((f"{PUSH}/app", digest("app 1.2.5"))),
+            "1.2.5",
+            latest_policy="always",
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 1.2.5"))
+        self.assertEqual(listings(run), [])
+        self.assertTrue(
+            any("latest_policy: always" in a for a in run.annotations), run.annotations
+        )
+
+    @unittest.expectedFailure
+    def test_digest_must_be_the_release_tag(self) -> None:
+        history(self.sandbox, "app", "2.0.1")
+        for images in (
+            pushed((f"{PUSH}/app", digest("something else"))),
+            # No 2.0.1 there at all.
+            pushed((f"{PUSH}/other", digest("app 2.0.1"))),
+        ):
+            with self.subTest(images=images):
+                run = self.latest(images)
+                self.assertEqual(run.status, 1, run.stdout)
+                self.assertEqual(run.mutations, [])
+                errors = [a for a in run.annotations if a.startswith("::error::")]
+                self.assertEqual(len(errors), 1, run.annotations)
+                self.assertIn(":2.0.1", errors[0])
+
+    @unittest.expectedFailure
+    def test_dry_run_reads_nothing(self) -> None:
+        run = self.latest(pushed((GHCR, digest("app"))), dry_run="true")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(run.json("latest"), [f"{GHCR}:latest"])
+        self.assertEqual(decided(run), [(GHCR, "", True, False)])
+        self.assertIn(f"Dry run: would tag {GHCR}:2.0.1 as latest", run.stdout)
+
+    @unittest.expectedFailure
+    def test_logs_in_to_each_image_host(self) -> None:
+        history(self.sandbox, "app", "2.0.1")
+        ghcr = self.sandbox.stage(f"{GHCR}:2.0.1", "app 2.0.1")
+        self.sandbox.seed(protected={PUSH: "robot:s3cret", "ghcr.io": "robot:s3cret"})
+        run = self.latest(
+            pushed((f"{PUSH}/app", digest("app 2.0.1")), (GHCR, ghcr)),
+            registry_user="robot",
+            registry_password="s3cret",
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        logins = [call[2] for call in run.calls if call[:2] == ["auth", "login"]]
+        self.assertEqual(logins, [PUSH, "ghcr.io"])
+        self.assertEqual(
+            (run.outputs["pull_endpoint"], run.outputs["push_endpoint"]), ("", "")
+        )
+
+    @unittest.expectedFailure
+    def test_images_json_validated(self) -> None:
+        good = {"image": GHCR, "digest": digest("app")}
+        cases = {
+            "": "images_json must be",
+            "[]": "images_json must be",
+            '{"image": "x"}': "images_json must be",
+            '["ghcr.io/a"]': "entry #1 is not an object",
+            json.dumps([{"image": GHCR}]): "needs a string 'digest'",
+            json.dumps([{**good, "digest": "sha256:abc"}]): "not a digest",
+            json.dumps([{**good, "image": f"{GHCR}:1.0"}]): "not an image repository",
+            json.dumps([{**good, "image": "onap/app"}]): "not an image repository",
+            json.dumps([{**good, "image": "ghcr.io"}]): "not an image repository",
+            json.dumps([good, good]): "more than once",
+        }
+        for raw, message in cases.items():
+            with self.subTest(images_json=raw):
+                self.refused(
+                    message, mode="latest", images_json=raw, release_tag="2.0.1"
+                )
+
+    @unittest.expectedFailure
+    def test_inputs_of_other_modes_refused(self) -> None:
+        images = pushed((GHCR, digest("app")))
+        others = {
+            "containers_json": containers(("app", "1-s")),
+            "pull_registry": PULL,
+            "push_registry": PUSH,
+            "namespace": "onap",
+        }
+        for key, value in others.items():
+            with self.subTest(key=key):
+                self.refused(
+                    f"{key} does not apply to mode: latest",
+                    **{
+                        "mode": "latest",
+                        "images_json": images,
+                        "release_tag": "2.0.1",
+                        key: value,
+                    },
+                )
+        self.refused(
+            "images_json applies only to mode: latest",
+            **inputs(images_json=images),
+        )
 
 
 class SameReferenceTest(SandboxTestCase):
