@@ -42,6 +42,11 @@ the inline step it:
 - **adds a verify mode that never writes**, so a verify lane can catch a
   release file naming an image that was never staged before the file
   merges.
+- **never moves `latest` back to a lower release.** A patch on an older
+  line (1.2.5 after 2.0.0) leaves `latest` on 2.0.0, unless
+  `latest_policy: always` (see [Latest policy](#latest-policy)). A
+  `latest` mode applies the same rule to images another tool has
+  already pushed.
 
 ## Usage Example
 
@@ -83,27 +88,58 @@ jobs:
     push_registry: nexus3.onap.org:10002
 ```
 
+### Move latest for images already pushed
+
+A lane that builds and pushes the release tag in one job, such as
+docker-workflows' build-test-release, passes the build job's `pushed`
+output as is. `release_tag` must be the tag the images carry: the
+version without its leading `v`, with `+` written as `_`.
+
+```yaml
+- id: image-tag
+  shell: bash
+  env:
+    TAG: ${{ needs.tag-validate.outputs.tag }}
+  run: |
+    version="${TAG#v}"
+    echo "tag=${version//+/_}" >> "$GITHUB_OUTPUT"
+- id: latest
+  uses: lfreleng-actions/docker-promote-action@<sha>  # vX.Y.Z
+  with:
+    mode: latest
+    images_json: ${{ needs.build.outputs.pushed }}
+    release_tag: ${{ steps.image-tag.outputs.tag }}
+# steps.latest.outputs.latest_decisions:
+# [{"image":..., "move":false, "reason":"older than 2.0.0", ...}, ...]
+```
+
+Images on more than one registry host, such as `ghcr.io` and
+`docker.io`, need a login each: log in beforehand and leave
+`registry_user` empty.
+
 <!-- markdownlint-enable MD046 -->
 
 ## Inputs
 
 <!-- markdownlint-disable MD013 -->
 
-| Name              | Required | Default   | Description                                                                                                                 |
-| ----------------- | -------- | --------- | --------------------------------------------------------------------------------------------------------------------------- |
-| containers_json   | True     |           | JSON array of `{name, version}` objects, as the check-release job emits; names are repository paths below the registry base |
-| release_tag       | True     |           | Tag every image releases under; `latest` refused (see push_latest)                                                          |
-| pull_registry     | True     |           | Registry base staged images come from: `host[:port]` with an optional repository path                                       |
-| push_registry     | True     |           | Registry base the release goes to, in the same form                                                                         |
-| namespace         | False    |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)            |
-| push_latest       | False    | `false`   | Also point each image's `latest` at its release digest, after every image has released                                      |
-| mode              | False    | `promote` | `promote`, or `verify`: read every source and destination, write nothing                                                    |
-| dry_run           | False    | `false`   | Print the plan without contacting any registry                                                                              |
-| on_conflict       | False    | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                             |
-| registry_user     | False    |           | Username to log in with; empty uses the runner's existing logins                                                            |
-| registry_password | False    |           | Password or token for registry_user                                                                                         |
-| install_crane     | False    | `true`    | Download the pinned crane and check its SHA-256; `false` uses crane from PATH                                               |
-| summary           | False    | `true`    | Write a promotion report to the step summary                                                                                |
+| Name              | Required        | Default   | Description                                                                                                                                |
+| ----------------- | --------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| containers_json   | Promote, verify |           | JSON array of `{name, version}` objects, as the check-release job emits; names are repository paths below the registry base                |
+| release_tag       | True            |           | Tag every image releases under; `latest` refused (see push_latest). Also the version latest_policy compares                                |
+| pull_registry     | Promote, verify |           | Registry base staged images come from: `host[:port]` with an optional repository path                                                      |
+| push_registry     | Promote, verify |           | Registry base the release goes to, in the same form                                                                                        |
+| namespace         | False           |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)                           |
+| push_latest       | False           | `false`   | Also point each image's `latest` at its release digest, after every image has released, as latest_policy allows                            |
+| latest_policy     | False           | `highest` | `highest`: move `latest` for a release at least the highest already there, never a lower one; `always`: move it regardless, with a warning |
+| images_json       | Latest          |           | For mode `latest`: JSON array of `{image, digest}` objects already pushed under release_tag; the action ignores other keys                 |
+| mode              | False           | `promote` | `promote`; `verify`: read every source and destination, write nothing; `latest`: apply latest_policy to images_json alone                  |
+| dry_run           | False           | `false`   | Print the plan without contacting any registry                                                                                             |
+| on_conflict       | False           | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                                            |
+| registry_user     | False           |           | Username to log in with; empty uses the runner's existing logins                                                                           |
+| registry_password | False           |           | Password or token for registry_user                                                                                                        |
+| install_crane     | False           | `true`    | Download the pinned crane and check its SHA-256; `false` uses crane from PATH                                                              |
+| summary           | False           | `true`    | Write a promotion report to the step summary                                                                                               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -111,14 +147,15 @@ jobs:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name           | Description                                                                           |
-| -------------- | ------------------------------------------------------------------------------------- |
-| promoted       | JSON list, one per container: `{name, source, destination, image, digest, status}`    |
-| promoted_count | Number of images this run copied                                                      |
-| skipped_count  | Number of images already released with the same digest                                |
-| latest         | JSON list of `<image>:latest` references moved (verify and dry runs: that would move) |
-| pull_endpoint  | Login endpoint (`host[:port]`) of pull_registry                                       |
-| push_endpoint  | Login endpoint (`host[:port]`) of push_registry                                       |
+| Name             | Description                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| promoted         | JSON list, one per container: `{name, source, destination, image, digest, status}`                            |
+| promoted_count   | Number of images this run copied                                                                              |
+| skipped_count    | Number of images already released with the same digest                                                        |
+| latest           | JSON list of `<image>:latest` references moved (verify and dry runs: that would move)                         |
+| latest_decisions | JSON list, one per image when `latest` is in play: `{image, digest, candidate, highest, move, moved, reason}` |
+| pull_endpoint    | Login endpoint (`host[:port]`) of pull_registry; empty for mode `latest`                                      |
+| push_endpoint    | Login endpoint (`host[:port]`) of push_registry; empty for mode `latest`                                      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -167,9 +204,51 @@ A `promoted` entry's `status` is one of:
    partially-latest release. The action reads back each `latest` too.
    `latest` moves even when every image is `skipped`: a run that
    copied everything but failed on `latest` leaves a release that a
-   re-run completes, and that re-run skips every copy. The
-   action does not compare the release against what `latest` held
-   before, so re-running an older release moves `latest` back to it.
+   re-run completes, and that re-run skips every copy. Whether each
+   `latest` moves at all is the [latest policy](#latest-policy)'s
+   decision, made in the check phase: the action lists each release
+   repository's tags there, so an unreadable tag list fails the run
+   before the action writes anything. Right before each move it lists
+   the repository again and decides afresh, so a higher release that
+   another run published meanwhile keeps `latest`.
+
+`mode: latest` runs the third phase alone. It first checks that each
+`<image>:<release_tag>` in `images_json` holds the digest given, then
+decides and moves each `latest` by that digest.
+
+### Latest policy
+
+With `latest_policy: highest`, the default, an image's `latest` moves
+when `release_tag` is at least the highest release version already in
+that image's repository, and stays put otherwise
+([docker-workflows#115]). Each image compares against its own
+repository. Versions compare by [SemVer 2.0.0] precedence, with these
+rules for registry tags:
+
+- a tag counts when it parses as SemVer, with or without a leading
+  `v`; the rule ignores `latest`, `1.2-STAGING-latest`, signature tags
+  and the like
+- pre-releases never move `latest` and never count as the highest
+- build metadata does not count, in SemVer's `+` form or the `_` form
+  Docker tags carry instead: `1.2.3_build.5` equals `1.2.3`
+- a release equal to the highest moves `latest`, so a re-run of the
+  highest release converges
+- a repository holding no release version yet moves `latest`
+
+`latest_policy: always` moves `latest` for any release, as the lane
+did, with a warning; use it to point `latest` back on purpose.
+
+Registries offer no way to change a tag on condition that it still
+holds what a run last read, so a short window remains between that
+final listing and the tag. Callers that may release more than one
+version of the same image at once should serialise those runs per
+repository, with a workflow `concurrency` group.
+
+The `latest_decisions` output and the step summary record each
+image's decision: the candidate, the highest release found, whether
+the policy allows the move, whether this run made it, and why. A dry
+run reads no registry, so it reports a release as `would move`
+unchecked; verify reads the tags and reports the real decision.
 
 ### Source and destination the same reference
 
@@ -315,6 +394,14 @@ Deliberate differences, each asserted by its own test:
   `skipped`
 - registry bases without a registry host, which the lane would pass
   to crane as Docker Hub references: the action refuses them
+- a source that is the destination itself: the registry ends up the
+  same, but the action skips it with a notice, appended to the lane's
+  dry-run summary
+- `push_latest` for a release older than one already there: the lane
+  moves `latest` back to it; the action leaves `latest` alone, and
+  matches the lane when `latest_policy` is `always`. A dry run's
+  summary appends the `latest` decisions below the lane's verbatim
+  summary
 
 The Jenkins `global-jjb` container release job skips an image whose
 release tag already exists, whatever it holds. The action skips when
@@ -343,5 +430,7 @@ registry, with and without authentication.
 
 [docker-workflows]: https://github.com/lfreleng-actions/docker-workflows
 [docker-workflows#30]: https://github.com/lfreleng-actions/docker-workflows/issues/30
+[docker-workflows#115]: https://github.com/lfreleng-actions/docker-workflows/issues/115
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/docker-promote-action/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/docker-promote-action/main.svg
+[SemVer 2.0.0]: https://semver.org/spec/v2.0.0.html

@@ -12,7 +12,6 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -22,7 +21,7 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from scripts import crane, install, promote
+from scripts import crane, install, latest, promote
 from scripts.gha import ActionError
 from scripts.refs import base_problem, login_endpoint
 from tests.support import ROOT, SandboxTestCase, digest, run_action
@@ -543,9 +542,7 @@ class DryRunTest(SandboxTestCase):
 class VersionTest(unittest.TestCase):
     """The latest rule itself: SemVer precedence over registry tags."""
 
-    @unittest.expectedFailure
     def test_decide(self) -> None:
-        latest = importlib.import_module("scripts.latest")
         noise = [
             "latest",
             "2.1-STAGING-latest",
@@ -591,9 +588,7 @@ class VersionTest(unittest.TestCase):
                 self.assertEqual((decision.move, decision.highest), (move, highest))
                 self.assertTrue(decision.reason)
 
-    @unittest.expectedFailure
     def test_is_release(self) -> None:
-        latest = importlib.import_module("scripts.latest")
         for tag in ("1.0.0", "v1.0.0", "0.0.0", "1.2.3_b.1", "1.2.3+b-1.x"):
             with self.subTest(tag=tag):
                 self.assertTrue(latest.is_release(tag))
@@ -619,7 +614,6 @@ class LatestPolicyTest(SandboxTestCase):
             self.sandbox, **inputs(*pairs, release_tag=tag, push_latest="true", **extra)
         )
 
-    @unittest.expectedFailure
     def test_first_release_moves(self) -> None:
         staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
         run = self.release("1.0.0")
@@ -643,7 +637,6 @@ class LatestPolicyTest(SandboxTestCase):
         )
         self.assertEqual(run.json("latest"), [f"{PUSH}/app:latest"])
 
-    @unittest.expectedFailure
     def test_newer_release_moves(self) -> None:
         staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(self.sandbox, "app", "2.0.0", latest="2.0.0")
@@ -653,7 +646,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", True, True)])
         self.assertIn("| moved |", run.summary)
 
-    @unittest.expectedFailure
     def test_older_release_does_not_move(self) -> None:
         staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(self.sandbox, "app", "2.0.0", latest="2.0.0")
@@ -669,7 +661,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertIn("| stays |", run.summary)
         self.assertIn("2.0.0", run.json("latest_decisions")[0]["reason"])
 
-    @unittest.expectedFailure
     def test_concurrent_higher_release_stops_the_move(self) -> None:
         # Another run releases 2.0.0 between this run's check and its
         # move: latest must not then move back to 1.2.5.
@@ -687,7 +678,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(run.json("latest"), [])
         self.assertIn("| stays |", run.summary)
 
-    @unittest.expectedFailure
     def test_rerun_of_an_older_release_does_not_move(self) -> None:
         # The docker-workflows#112 case: an old release re-detected.
         self.sandbox.stage(f"{PULL}/app:1-s", "app 2.0.0")
@@ -699,7 +689,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(run.tags[f"{PUSH}/app:latest"], digest("app 2.0.1"))
         self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.1", False, False)])
 
-    @unittest.expectedFailure
     def test_rerun_with_everything_skipped_converges(self) -> None:
         # A 2.0.1 run that failed before latest moved: re-running it,
         # every copy skipped, completes the release.
@@ -717,7 +706,6 @@ class LatestPolicyTest(SandboxTestCase):
             [(f"{PUSH}/a", "2.0.1", True, True), (f"{PUSH}/b", "2.0.1", True, True)],
         )
 
-    @unittest.expectedFailure
     def test_pre_release_does_not_move(self) -> None:
         self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(self.sandbox, "app", "2.0.1", latest="2.0.1")
@@ -732,7 +720,6 @@ class LatestPolicyTest(SandboxTestCase):
         notices = [a for a in run.annotations if a.startswith("::notice::")]
         self.assertTrue(any("pre-release" in n for n in notices), run.annotations)
 
-    @unittest.expectedFailure
     def test_non_semver_tags_are_ignored(self) -> None:
         staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(
@@ -752,7 +739,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
         self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", True, True)])
 
-    @unittest.expectedFailure
     def test_build_metadata_does_not_count(self) -> None:
         staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(self.sandbox, "app", "2.0.1_build.7", latest="2.0.1_build.7")
@@ -761,7 +747,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(run.tags[f"{PUSH}/app:latest"], staged)
         self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.1_build.7", True, True)])
 
-    @unittest.expectedFailure
     def test_each_image_compares_against_its_own_repository(self) -> None:
         staged = {n: self.sandbox.stage(f"{PULL}/{n}:1-s", n) for n in ("a", "b")}
         history(self.sandbox, "a", "2.0.0", latest="2.0.0")
@@ -775,7 +760,6 @@ class LatestPolicyTest(SandboxTestCase):
             [(f"{PUSH}/a", "2.0.0", False, False), (f"{PUSH}/b", "", True, True)],
         )
 
-    @unittest.expectedFailure
     def test_always_moves_regardless(self) -> None:
         staged = self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(self.sandbox, "app", "2.0.0", latest="2.0.0")
@@ -788,7 +772,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(len(warnings), 1, run.annotations)
         self.assertIn("latest_policy: always", warnings[0])
 
-    @unittest.expectedFailure
     def test_unreadable_tag_list_fails_before_any_write(self) -> None:
         self.sandbox.stage(f"{PULL}/app:1-s", "app")
         self.sandbox.seed(fail_ls={f"{PUSH}/app": UNAUTHORIZED})
@@ -800,7 +783,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(len(errors), 1, run.annotations)
         self.assertIn("UNAUTHORIZED", errors[0])
 
-    @unittest.expectedFailure
     def test_without_push_latest_nothing_is_listed(self) -> None:
         self.sandbox.stage(f"{PULL}/app:1-s", "app")
         run = run_action(self.sandbox, **inputs())
@@ -808,7 +790,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(listings(run), [])
         self.assertEqual(run.json("latest_decisions"), [])
 
-    @unittest.expectedFailure
     def test_verify_reports_the_decision(self) -> None:
         self.sandbox.stage(f"{PULL}/app:1-s", "app")
         history(self.sandbox, "app", "2.0.0", latest="2.0.0")
@@ -824,7 +805,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(decided(newer), [(f"{PUSH}/app", "2.0.0", True, False)])
         self.assertIn("| would move |", newer.summary)
 
-    @unittest.expectedFailure
     def test_dry_run_reports_what_it_can_offline(self) -> None:
         run = self.release("2.0.1", dry_run="true")
         self.assertEqual(run.status, 0, run.stdout)
@@ -839,7 +819,6 @@ class LatestPolicyTest(SandboxTestCase):
         self.assertEqual(decided(pre), [(f"{PUSH}/app", "", False, False)])
         self.assertNotIn("as latest", pre.stdout)
 
-    @unittest.expectedFailure
     def test_policy_validated(self) -> None:
         run = self.release("1.0.0", latest_policy="newest")
         self.assertEqual(run.status, 1, run.stdout)
@@ -875,7 +854,6 @@ class LatestModeTest(SandboxTestCase):
         self.assertEqual(len(errors), 1, run.annotations)
         self.assertIn(message, errors[0])
 
-    @unittest.expectedFailure
     def test_moves_each_image_to_the_highest_release(self) -> None:
         history(self.sandbox, "app", "2.0.0", "2.0.1", latest="2.0.0")
         ghcr = self.sandbox.stage(f"{GHCR}:2.0.1", "app 2.0.1")
@@ -898,7 +876,6 @@ class LatestModeTest(SandboxTestCase):
         self.assertEqual(run.json("promoted"), [])
         self.assertIn("| moved |", run.summary)
 
-    @unittest.expectedFailure
     def test_older_release_does_not_move(self) -> None:
         history(self.sandbox, "app", "1.2.5", "2.0.0", latest="2.0.0")
         run = self.latest(pushed((f"{PUSH}/app", digest("app 1.2.5"))), "1.2.5")
@@ -908,7 +885,6 @@ class LatestModeTest(SandboxTestCase):
         self.assertEqual(decided(run), [(f"{PUSH}/app", "2.0.0", False, False)])
         self.assertIn("| stays |", run.summary)
 
-    @unittest.expectedFailure
     def test_always_moves_regardless(self) -> None:
         history(self.sandbox, "app", "1.2.5", "2.0.0", latest="2.0.0")
         run = self.latest(
@@ -923,7 +899,6 @@ class LatestModeTest(SandboxTestCase):
             any("latest_policy: always" in a for a in run.annotations), run.annotations
         )
 
-    @unittest.expectedFailure
     def test_digest_must_be_the_release_tag(self) -> None:
         history(self.sandbox, "app", "2.0.1")
         for images in (
@@ -938,8 +913,10 @@ class LatestModeTest(SandboxTestCase):
                 errors = [a for a in run.annotations if a.startswith("::error::")]
                 self.assertEqual(len(errors), 1, run.annotations)
                 self.assertIn(":2.0.1", errors[0])
+                # The summary must not claim the image was released.
+                self.assertIn("**1** image(s) given for `2.0.1`", run.summary)
+                self.assertNotIn("released", run.summary)
 
-    @unittest.expectedFailure
     def test_dry_run_reads_nothing(self) -> None:
         run = self.latest(pushed((GHCR, digest("app"))), dry_run="true")
         self.assertEqual(run.status, 0, run.stdout)
@@ -948,7 +925,6 @@ class LatestModeTest(SandboxTestCase):
         self.assertEqual(decided(run), [(GHCR, "", True, False)])
         self.assertIn(f"Dry run: would tag {GHCR}:2.0.1 as latest", run.stdout)
 
-    @unittest.expectedFailure
     def test_logs_in_to_each_image_host(self) -> None:
         history(self.sandbox, "app", "2.0.1")
         ghcr = self.sandbox.stage(f"{GHCR}:2.0.1", "app 2.0.1")
@@ -965,7 +941,6 @@ class LatestModeTest(SandboxTestCase):
             (run.outputs["pull_endpoint"], run.outputs["push_endpoint"]), ("", "")
         )
 
-    @unittest.expectedFailure
     def test_images_json_validated(self) -> None:
         good = {"image": GHCR, "digest": digest("app")}
         cases = {
@@ -986,7 +961,6 @@ class LatestModeTest(SandboxTestCase):
                     message, mode="latest", images_json=raw, release_tag="2.0.1"
                 )
 
-    @unittest.expectedFailure
     def test_inputs_of_other_modes_refused(self) -> None:
         images = pushed((GHCR, digest("app")))
         others = {

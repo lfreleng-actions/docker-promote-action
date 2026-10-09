@@ -37,7 +37,6 @@ Five deliberate differences are asserted rather than compared:
 from __future__ import annotations
 
 import json
-import unittest
 from collections.abc import Callable, Mapping
 
 from tests.support import Run, Sandbox, SandboxTestCase, digest, run_action, run_legacy
@@ -175,7 +174,6 @@ class PromotionTest(Differential):
                 old, new = self.both(seed, inputs)
                 self.assert_same_registry(old, new)
 
-    @unittest.expectedFailure
     def test_dry_run_log_and_summary(self) -> None:
         for name, (seed, inputs) in SCENARIOS.items():
             for latest in ("false", "true"):
@@ -250,7 +248,6 @@ class PromotionTest(Differential):
         self.assertEqual(new.mutations, [])
         self.assertEqual(new.json("promoted")[0]["status"], "skipped")
 
-    @unittest.expectedFailure
     def test_older_release_leaves_latest_unless_always(self) -> None:
         def seed(sandbox: Sandbox) -> None:
             sandbox.stage(f"{PULL}/app:1-s", "1.2.5 bits")
