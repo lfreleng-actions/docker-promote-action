@@ -15,7 +15,9 @@ from dataclasses import dataclass
 
 from scripts import gha
 from scripts.gha import ActionError
+from scripts.latest import POLICIES
 from scripts.refs import (
+    DIGEST,
     MAX_PATH,
     PATH,
     TAG,
@@ -24,7 +26,8 @@ from scripts.refs import (
     login_endpoint,
 )
 
-MODES = ("promote", "verify")
+# 'latest' applies the latest rule alone, to images already pushed.
+MODES = ("promote", "verify", "latest")
 ON_CONFLICT = ("fail", "overwrite")
 # The lanes' constraint: registry accounts use '@' and '+' (Artifactory
 # SaaS identities are often email addresses).
@@ -34,6 +37,12 @@ CONTAINERS_ERROR = (
     "containers_json must be a non-empty JSON array of {name, version} objects "
     "with string values, as docker-workflows' check-release job emits"
 )
+IMAGES_ERROR = (
+    "images_json must be a non-empty JSON array of {image, digest} objects "
+    "with string values, as docker-workflows' build job's pushed output"
+)
+# Inputs naming what promote and verify copy, unused by mode: latest.
+PROMOTION_INPUTS = ("containers_json", "pull_registry", "push_registry", "namespace")
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,60 @@ class Container:
         return source_tag == release_tag and canonical_repository(
             self.source_repository
         ) == canonical_repository(self.image)
+
+
+@dataclass(frozen=True)
+class Pushed:
+    """An image already released under release_tag, for mode: latest."""
+
+    image: str
+    digest: str
+
+
+def _image_problem(entry: object) -> str | None:
+    if not isinstance(entry, dict):
+        return "is not an object"
+    for key in ("image", "digest"):
+        if not isinstance(entry.get(key), str):
+            return f"needs a string '{key}'"
+    image, digest = entry["image"], entry["digest"]
+    if (
+        "/" not in image
+        or base_problem(image)
+        or len(image.split("/", 1)[1]) > MAX_PATH
+    ):
+        return (
+            f"has an 'image' that is not an image repository (a registry host and "
+            f"repository path, with no tag or digest): '{image}'"
+        )
+    if not DIGEST.fullmatch(digest):
+        return f"has a 'digest' that is not a digest: '{digest}'"
+    return None
+
+
+def parse_images(raw: str) -> list[Pushed]:
+    """The images of images_json, checked in full; other keys are ignored."""
+    try:
+        data = json.loads(raw)
+    except ValueError as err:
+        raise ActionError(IMAGES_ERROR) from err
+    if not isinstance(data, list) or not data:
+        raise ActionError(IMAGES_ERROR)
+    images: list[Pushed] = []
+    for index, entry in enumerate(data):
+        problem = _image_problem(entry)
+        if problem:
+            raise ActionError(f"{IMAGES_ERROR}; entry #{index + 1} {problem}")
+        images.append(Pushed(entry["image"], entry["digest"]))
+    repositories = [canonical_repository(image.image) for image in images]
+    duplicates = sorted({r for r in repositories if repositories.count(r) > 1})
+    if duplicates:
+        # Each repository has one 'latest'.
+        raise ActionError(
+            f"images_json names {', '.join(duplicates)} more than once; each "
+            "repository has one latest"
+        )
+    return images
 
 
 def _container_problem(entry: object) -> str | None:
@@ -139,6 +202,36 @@ def _choice(name: str, raw: str, choices: tuple[str, ...]) -> str:
     return value
 
 
+def _containers(
+    pull: str, push: str, namespace: str, release_tag: str
+) -> list[Container]:
+    """containers_json, resolved against the registry bases."""
+    containers = []
+    for name, version in parse_containers(gha.env("INPUT_CONTAINERS_JSON")):
+        # Release-file names are relative to the namespace, as in
+        # global-jjb's release-job.sh.
+        relative = f"{namespace}/{name}" if namespace else name
+        image = f"{push}/{relative}"
+        for repository in (f"{pull}/{relative}", image):
+            path = repository.split("/", 1)[1]
+            if len(path) > MAX_PATH:
+                raise ActionError(
+                    f"containers_json entry {name} resolves to {repository}, a "
+                    f"{len(path)}-character repository path, over Docker's "
+                    f"limit of {MAX_PATH}"
+                )
+        containers.append(
+            Container(
+                name=name,
+                version=version,
+                source=f"{pull}/{relative}:{version}",
+                destination=f"{image}:{release_tag}",
+                image=image,
+            )
+        )
+    return containers
+
+
 @dataclass(frozen=True)
 class Settings:
     """The action inputs, parsed and validated."""
@@ -149,6 +242,7 @@ class Settings:
     push_registry: str
     namespace: str = ""
     push_latest: bool = False
+    latest_policy: str = "highest"
     dry_run: bool = False
     mode: str = "promote"
     on_conflict: str = "fail"
@@ -156,10 +250,14 @@ class Settings:
     registry_password: str = ""
     install_crane: bool = True
     summary: bool = True
+    # mode: latest's subjects, in place of containers.
+    images: tuple[Pushed, ...] = ()
 
     @property
     def endpoints(self) -> tuple[str, ...]:
-        """Distinct login endpoints, pull registry first."""
+        """Distinct login endpoints: pull registry first, or each image's host."""
+        if self.mode == "latest":
+            return tuple(dict.fromkeys(login_endpoint(i.image) for i in self.images))
         pull, push = (
             login_endpoint(self.pull_registry),
             login_endpoint(self.push_registry),
@@ -174,7 +272,12 @@ class Settings:
     @property
     def writes(self) -> bool:
         """Whether the run may change registry state."""
-        return not self.dry_run and self.mode == "promote"
+        return not self.dry_run and self.mode != "verify"
+
+    @property
+    def moves_latest(self) -> bool:
+        """Whether the run decides on 'latest': push_latest, or mode: latest."""
+        return self.push_latest or self.mode == "latest"
 
     def double_prefixed(self) -> list[Container]:
         """Containers whose release-file name already starts with the namespace."""
@@ -187,6 +290,7 @@ class Settings:
     def from_env(cls) -> Settings:
         """Read and cross-check the INPUT_* variables."""
         env = gha.env
+        mode = _choice("mode", env("INPUT_MODE"), MODES)
         release_tag = env("INPUT_RELEASE_TAG").strip()
         if not TAG.fullmatch(release_tag):
             raise ActionError(
@@ -199,32 +303,27 @@ class Settings:
                 "release_tag 'latest' is a moving tag; promote to the release "
                 "version and set push_latest instead"
             )
-        pull = _base("pull_registry", env("INPUT_PULL_REGISTRY"))
-        push = _base("push_registry", env("INPUT_PUSH_REGISTRY"))
-        namespace = _namespace(env("INPUT_NAMESPACE"))
-        containers = []
-        for name, version in parse_containers(env("INPUT_CONTAINERS_JSON")):
-            # Release-file names are relative to the namespace, as in
-            # global-jjb's release-job.sh.
-            relative = f"{namespace}/{name}" if namespace else name
-            image = f"{push}/{relative}"
-            for repository in (f"{pull}/{relative}", image):
-                path = repository.split("/", 1)[1]
-                if len(path) > MAX_PATH:
+        images: tuple[Pushed, ...] = ()
+        if mode == "latest":
+            for name in PROMOTION_INPUTS:
+                if env(f"INPUT_{name.upper()}").strip():
                     raise ActionError(
-                        f"containers_json entry {name} resolves to {repository}, a "
-                        f"{len(path)}-character repository path, over Docker's "
-                        f"limit of {MAX_PATH}"
+                        f"{name} does not apply to mode: latest, which moves "
+                        "latest for the images already pushed in images_json"
                     )
-            containers.append(
-                Container(
-                    name=name,
-                    version=version,
-                    source=f"{pull}/{relative}:{version}",
-                    destination=f"{image}:{release_tag}",
-                    image=image,
+            images = tuple(parse_images(env("INPUT_IMAGES_JSON")))
+            pull = push = namespace = ""
+            containers: list[Container] = []
+        else:
+            if env("INPUT_IMAGES_JSON").strip():
+                raise ActionError(
+                    "images_json applies only to mode: latest; promote and verify "
+                    "take containers_json"
                 )
-            )
+            pull = _base("pull_registry", env("INPUT_PULL_REGISTRY"))
+            push = _base("push_registry", env("INPUT_PUSH_REGISTRY"))
+            namespace = _namespace(env("INPUT_NAMESPACE"))
+            containers = _containers(pull, push, namespace, release_tag)
         settings = cls(
             containers=tuple(containers),
             release_tag=release_tag,
@@ -232,13 +331,17 @@ class Settings:
             push_registry=push,
             namespace=namespace,
             push_latest=gha.env_bool("INPUT_PUSH_LATEST", "push_latest", False),
+            latest_policy=_choice(
+                "latest_policy", env("INPUT_LATEST_POLICY"), POLICIES
+            ),
             dry_run=gha.env_bool("INPUT_DRY_RUN", "dry_run", False),
-            mode=_choice("mode", env("INPUT_MODE"), MODES),
+            mode=mode,
             on_conflict=_choice("on_conflict", env("INPUT_ON_CONFLICT"), ON_CONFLICT),
             registry_user=env("INPUT_REGISTRY_USER").strip(),
             registry_password=env("INPUT_REGISTRY_PASSWORD"),
             install_crane=gha.env_bool("INPUT_INSTALL_CRANE", "install_crane", True),
             summary=gha.env_bool("INPUT_SUMMARY", "summary", True),
+            images=images,
         )
         settings.check()
         return settings

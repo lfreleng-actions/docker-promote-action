@@ -17,6 +17,14 @@ multi-architecture index keeps its digest. Three phases:
    match.
 3. Latest: only once every container is released does 'latest' move,
    by digest, so a failed copy never leaves a partially-latest release.
+   It moves only to the highest release (scripts/latest.py, applied by
+   scripts/latest_phase.py): the check phase lists each destination
+   repository's tags and decides, so an unreadable tag list also fails
+   the run before anything is written.
+
+mode: latest runs the third phase alone, for images already pushed
+under release_tag by another tool: it checks that each image's
+release tag holds the digest given, then decides and moves.
 
 A destination already holding the source digest is 'skipped': the
 release happened before, as global-jjb's container release job finds
@@ -37,6 +45,7 @@ from dataclasses import dataclass
 from scripts import gha, install
 from scripts.crane import Crane
 from scripts.gha import ActionError
+from scripts.latest_phase import LatestPhase
 from scripts.settings import Container, Settings
 
 # Statuses that count as released, and so may carry 'latest'.
@@ -73,6 +82,7 @@ class Promotion:
         self.settings = settings
         self.crane = crane
         self.results = [Result(container) for container in settings.containers]
+        self.phase = LatestPhase(settings, self._registry)
         self.latest: list[str] = []
 
     def _registry(self) -> Crane:
@@ -98,20 +108,33 @@ class Promotion:
                 "probably double-prefixed: release-file names are relative to the "
                 "namespace",
             )
+        self.phase.announce()
         if self.settings.dry_run:
             self._plan()
             return True
-        ok = self._check()
+        if self.settings.mode == "latest":
+            ok = self.phase.check_pushed()
+        else:
+            ok = self._check()
+        if ok and self.settings.moves_latest:
+            ok = self.phase.decide(self._subjects())
         if not self.settings.writes:
-            if ok and self.settings.push_latest:
-                self.latest = [f"{r.container.image}:latest" for r in self.results]
+            if ok:
+                self.latest = self.phase.movable()
             return ok
         if ok:
-            ok = self._copy() and (not self.settings.push_latest or self._move_latest())
+            ok = self._copy() and self.phase.move()
+            self.latest = self.phase.moved()
         for result in self.results:
             if result.status == "ready":
                 result.status = "pending"
         return ok
+
+    def _subjects(self) -> list[tuple[str, str]]:
+        """(image, digest) of every image whose latest the run decides on."""
+        if self.settings.mode == "latest":
+            return [(pushed.image, pushed.digest) for pushed in self.settings.images]
+        return [(result.container.image, result.digest) for result in self.results]
 
     def _plan(self) -> None:
         # The lane's dry-run lines, verbatim: no registry is contacted.
@@ -121,11 +144,8 @@ class Promotion:
             gha.log(
                 f"Dry run: would copy {container.source} -> {container.destination}"
             )
-        if self.settings.push_latest:
-            for result in self.results:
-                container = result.container
-                gha.log(f"Dry run: would tag {container.destination} as latest")
-                self.latest.append(f"{container.image}:latest")
+        if self.settings.moves_latest:
+            self.latest = self.phase.plan(self._subjects())
 
     def _check(self) -> bool:
         """Read every source and destination; True when all may proceed."""
@@ -223,44 +243,21 @@ class Promotion:
             return False
         return True
 
-    def _move_latest(self) -> bool:
-        """Point every released image's 'latest' at its release digest."""
-        crane = self._registry()
-        for result in self.results:
-            container = result.container
-            gha.group(f"Tag {container.image}:latest")
-            tagged = crane.tag(f"{container.image}@{result.digest}", "latest")
-            gha.endgroup()
-            if not tagged.ok:
-                gha.annotate(
-                    "error", f"Tagging {container.image}:latest failed: {tagged.detail}"
-                )
-                return False
-            try:
-                landed = crane.digest(f"{container.image}:latest")
-            except ActionError as err:
-                gha.annotate("error", f"Tagging {container.image}:latest: {err}")
-                return False
-            if landed != result.digest:
-                gha.annotate(
-                    "error",
-                    f"{container.image}:latest reads back as {landed or 'absent'}, "
-                    f"not {result.digest}",
-                )
-                return False
-            self.latest.append(f"{container.image}:latest")
-        return True
-
     def outputs(self) -> dict[str, str]:
         """The step outputs, written whether or not the run succeeded."""
         statuses = [result.status for result in self.results]
+        # mode: latest has no pull or push registry, only image hosts.
+        endpoints = (
+            ("", "") if self.settings.mode == "latest" else self.settings.endpoints
+        )
         return {
             "promoted": _compact([result.record() for result in self.results]),
             "promoted_count": str(statuses.count("promoted")),
             "skipped_count": str(statuses.count("skipped")),
             "latest": _compact(self.latest),
-            "pull_endpoint": self.settings.endpoints[0],
-            "push_endpoint": self.settings.endpoints[-1],
+            "latest_decisions": _compact(self.phase.records()),
+            "pull_endpoint": endpoints[0],
+            "push_endpoint": endpoints[-1],
         }
 
     def _same_reference(self) -> list[Container]:
@@ -279,15 +276,19 @@ class Promotion:
 
     def summary(self) -> str:
         """The step summary in Markdown."""
+        if self.settings.mode == "latest":
+            return self.phase.summary()
         lines = ["## Release Promotion", ""]
         if self.settings.dry_run:
-            # The lane's dry-run summary, verbatim, then any notice.
+            # The lane's dry-run summary, verbatim, then any notice and
+            # the latest decisions.
             tags = [r.container.destination for r in self.results] + self.latest
             lines += [f"Dry run: **{len(tags)}** tag(s) computed, nothing promoted", ""]
             lines += [f"- `{tag}`" for tag in tags]
             text = "\n".join(lines) + "\n\n"
-            note = self._same_reference_note()
-            return text + ("\n".join(note) + "\n\n" if note else "")
+            for extra in (self._same_reference_note(), self.phase.table()):
+                text += "\n".join(extra) + "\n\n" if extra else ""
+            return text
         statuses = [result.status for result in self.results]
         if self.settings.mode == "verify":
             lines.append(
@@ -317,6 +318,9 @@ class Promotion:
             moved = "Would move" if self.settings.mode == "verify" else "Moved"
             lines += ["", f"{moved} `latest`:", ""]
             lines += [f"- `{ref}`" for ref in self.latest]
+        table = self.phase.table()
+        if table:
+            lines += ["", *table]
         note = self._same_reference_note()
         if note:
             lines += ["", *note]
