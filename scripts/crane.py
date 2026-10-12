@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from scripts import gha
 from scripts.gha import ActionError
+from scripts.refs import DIGEST
 
 # The OCI distribution-spec codes for "no such manifest/repository",
 # and the bare 404 crane reports when a registry sends no error body:
@@ -31,7 +32,6 @@ _ABSENT = re.compile(
     r"MANIFEST_UNKNOWN|NAME_UNKNOWN"
     r"|unexpected status code 404 Not Found(:| \(HEAD responses have no body.*\))?$"
 )
-_DIGEST = re.compile(r"sha256:[0-9a-f]{64}|sha384:[0-9a-f]{96}|sha512:[0-9a-f]{128}")
 
 
 @dataclass(frozen=True)
@@ -116,12 +116,21 @@ class Crane:
             if _ABSENT.search(outcome.detail):
                 return None
             raise ActionError(f"cannot read {ref}: {outcome.detail}")
-        if not _DIGEST.fullmatch(outcome.detail):
+        if not DIGEST.fullmatch(outcome.detail):
             raise ActionError(
                 f"cannot read {ref}: crane digest printed '{outcome.detail}', "
                 "not a digest"
             )
         return outcome.detail
+
+    def tags(self, repository: str) -> list[str]:
+        """Every tag in ``repository``; none when the repository is absent."""
+        outcome = self._capture(["ls", repository])
+        if not outcome.ok:
+            if _ABSENT.search(outcome.detail):
+                return []
+            raise ActionError(f"cannot list the tags of {repository}: {outcome.detail}")
+        return [line.strip() for line in outcome.detail.splitlines() if line.strip()]
 
     def copy(self, source: str, destination: str, no_clobber: bool) -> Outcome:
         """Copy every manifest under ``source`` to ``destination``, as is.

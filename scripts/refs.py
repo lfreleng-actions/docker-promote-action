@@ -27,6 +27,8 @@ COMPONENT = re.compile(r"[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*")
 PATH = re.compile(rf"{COMPONENT.pattern}(/{COMPONENT.pattern})*")
 # Docker's grammar for a tag.
 TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
+# A manifest digest, in the algorithms registries serve.
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}|sha384:[0-9a-f]{96}|sha512:[0-9a-f]{128}")
 # Docker caps the repository path, the part after the registry.
 MAX_PATH = 255
 

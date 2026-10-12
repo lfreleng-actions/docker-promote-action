@@ -12,10 +12,14 @@
 # Input names follow the docker-workflows merge lane's release-publish
 # job, so its "Promote staged images" step swaps for this action one
 # for one. tests/test_equivalence.py proves the registry each leaves
-# behind is the same, apart from three deliberate differences listed
+# behind is the same, apart from the deliberate differences listed
 # there: a release tag holding other bits is refused, a missing staged
-# image is found before anything is written, and an existing identical
-# release is skipped.
+# image is found before anything is written, an existing identical
+# release is skipped, and 'latest' moves only to the highest release
+# (docker-workflows#115) unless latest_policy is 'always'.
+#
+# mode: latest applies that rule alone to images another tool has
+# already pushed, for the lane that builds and pushes in one job.
 name: "🐳 Docker Promote"
 description: >
   Promote staged container images to a release registry by digest,
@@ -30,24 +34,31 @@ inputs:
       staged <pull_registry>/<name>:<version> promotes to
       <push_registry>/<name>:<release_tag>. Names are repository paths
       below the registry base (onap/app); names must be unique.
-    required: true
+      Required for modes promote and verify; mode latest refuses it.
+    required: false
+    default: ""
   release_tag:
     description: >
       The tag every image is released under (the release file's
       container_release_tag). Release tags are treated as immutable,
-      so 'latest' is refused; see push_latest.
+      so 'latest' is refused; see push_latest. It is also the version
+      latest_policy compares.
     required: true
   pull_registry:
     description: >
       Registry base the staged images are read from: host[:port] with
       an optional repository path, such as nexus3.onap.org:10003 or
-      acme.jfrog.io/docker-snapshot.
-    required: true
+      acme.jfrog.io/docker-snapshot. Required for modes promote and
+      verify; mode latest refuses it.
+    required: false
+    default: ""
   push_registry:
     description: >
       Registry base the release is written to, in the same form, such
       as nexus3.onap.org:10002 or acme.jfrog.io/docker-release.
-    required: true
+      Required for modes promote and verify; mode latest refuses it.
+    required: false
+    default: ""
   namespace:
     description: >
       Repository path placed between each registry base and container
@@ -62,9 +73,26 @@ inputs:
   push_latest:
     description: >
       Also point each image's 'latest' tag at its release digest, once
-      every image has been released.
+      every image has been released, as latest_policy allows.
     required: false
     default: "false"
+  latest_policy:
+    description: >
+      When 'latest' moves. 'highest' moves it only when release_tag is
+      a SemVer release at least as high as every release version
+      already in that image's repository; pre-releases never move it,
+      tags that are not SemVer are ignored and build metadata does not
+      count. 'always' moves it for any release, older ones included,
+      with a warning: use it only to point latest back on purpose.
+    required: false
+    default: "highest"
+  images_json:
+    description: >
+      mode latest only: JSON array of {image, digest} objects, the
+      images already pushed under release_tag (other keys are ignored,
+      so docker-workflows' build job's pushed output fits as is).
+    required: false
+    default: ""
 
   # --- How --------------------------------------------------------------
   mode:
@@ -75,6 +103,10 @@ inputs:
       verify lane can catch either before the release file merges. With
       on_conflict 'overwrite', verify predicts that run instead: a
       release tag holding other bits warns and reports 'ready'.
+      'latest' applies latest_policy alone to images another tool has
+      already pushed (images_json), whatever push_latest says: it
+      checks each <image>:<release_tag> holds the digest given, then
+      moves each latest the policy allows.
     required: false
     default: "promote"
   dry_run:
@@ -137,11 +169,20 @@ outputs:
       JSON list of the <image>:latest references moved (or, for verify
       and dry runs, that would move)
     value: ${{ steps.promote.outputs.latest }}
+  latest_decisions:
+    description: >
+      JSON list, one entry per image when latest is in play: {image,
+      digest, candidate, highest, move, moved, reason}. move is the
+      policy's verdict, moved whether this run moved it; highest is
+      the highest release tag found, empty when none or not read.
+    value: ${{ steps.promote.outputs.latest_decisions }}
   pull_endpoint:
-    description: "Login endpoint (host[:port]) of pull_registry"
+    description: >
+      Login endpoint (host[:port]) of pull_registry; empty for mode latest
     value: ${{ steps.promote.outputs.pull_endpoint }}
   push_endpoint:
-    description: "Login endpoint (host[:port]) of push_registry"
+    description: >
+      Login endpoint (host[:port]) of push_registry; empty for mode latest
     value: ${{ steps.promote.outputs.push_endpoint }}
 
 runs:
@@ -157,6 +198,8 @@ runs:
         INPUT_PUSH_REGISTRY: ${{ inputs.push_registry }}
         INPUT_NAMESPACE: ${{ inputs.namespace }}
         INPUT_PUSH_LATEST: ${{ inputs.push_latest }}
+        INPUT_LATEST_POLICY: ${{ inputs.latest_policy }}
+        INPUT_IMAGES_JSON: ${{ inputs.images_json }}
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_DRY_RUN: ${{ inputs.dry_run }}
         INPUT_ON_CONFLICT: ${{ inputs.on_conflict }}

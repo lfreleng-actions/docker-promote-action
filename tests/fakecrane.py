@@ -14,6 +14,7 @@ registry:2 container:
 * ``copy --no-clobber`` over any existing tag, even one holding the
   same digest: exit 1, ``refusing to clobber existing tag``
 * ``auth login`` stores whatever credential it is given, unchecked
+* ``ls`` of a repository that does not exist: exit 1, ``NAME_UNKNOWN``
 
 State lives in the JSON file ``$FAKECRANE_STATE``; every invocation
 appends its argv to ``$FAKECRANE_LOG``, one JSON array per line.
@@ -46,8 +47,10 @@ def _load() -> State:
         "fail",
         "fail_copy",
         "fail_tag",
+        "fail_ls",
         "race",
         "after_copy",
+        "after_ls",
     ):
         state.setdefault(key, {})
     return state
@@ -174,6 +177,37 @@ def _tag(state: State, args: list[str]) -> int:
     return 0
 
 
+def _ls(state: State, args: list[str]) -> int:
+    (repository,) = [arg for arg in args if not arg.startswith("-")]
+    host, _, path = repository.partition("/")
+    scheme = "http" if host.startswith("localhost") else "https"
+    url = f"{scheme}://{host}/v2/{path}/tags/list?n=1000"
+    failures = {**state["fail"], **state["fail_ls"]}
+    for pattern, message in failures.items():
+        if pattern in repository:
+            raise Failure(f"reading tags for {repository}: GET {url}: {message}")
+    _authorise(state, repository)
+    tags = sorted(
+        tag
+        for ref in state["tags"]
+        for held, separator, tag in [split(ref)]
+        if held == repository and separator == ":"
+    )
+    if not tags and repository not in state["manifests"]:
+        raise Failure(
+            f"reading tags for {repository}: GET {url}: NAME_UNKNOWN: repository "
+            f"name not known to registry; map[name:{path}]"
+        )
+    for tag in tags:
+        print(tag)
+    if repository in state["after_ls"]:
+        # Another run releases into the repository once this listing is read.
+        for ref, digest in state["after_ls"].pop(repository).items():
+            state["tags"][ref] = digest
+            _store(state, repository, digest)
+    return 0
+
+
 def _login(args: list[str]) -> int:
     host = args[0]
     user = ""
@@ -204,6 +238,8 @@ def _dispatch(state: State, argv: list[str]) -> int:
         return _copy(state, args)
     if command == "tag":
         return _tag(state, args)
+    if command == "ls":
+        return _ls(state, args)
     if argv[:2] == ["auth", "login"]:
         return _login(argv[2:])
     print(f"fakecrane: unsupported command {argv!r}", file=sys.stderr)
