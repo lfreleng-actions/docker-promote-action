@@ -41,7 +41,7 @@ jobs:
       - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         if: runner.os == 'Linux'
         with:
-          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
 
       # Harden the runner with the just-loaded allow-list.
       - name: 'Harden runner (block)'
