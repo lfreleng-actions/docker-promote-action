@@ -26,8 +26,9 @@ from scripts.refs import (
     login_endpoint,
 )
 
-# 'latest' applies the latest rule alone, to images already pushed.
-MODES = ("promote", "verify", "latest")
+# 'latest' applies the latest rule alone, to images already pushed;
+# 'validate' checks the registry bases alone.
+MODES = ("promote", "verify", "latest", "validate")
 ON_CONFLICT = ("fail", "overwrite")
 # The lanes' constraint: registry accounts use '@' and '+' (Artifactory
 # SaaS identities are often email addresses).
@@ -43,6 +44,8 @@ IMAGES_ERROR = (
 )
 # Inputs naming what promote and verify copy, unused by mode: latest.
 PROMOTION_INPUTS = ("containers_json", "pull_registry", "push_registry", "namespace")
+# Inputs naming images, unused by mode: validate.
+IMAGE_INPUTS = ("containers_json", "images_json", "namespace")
 
 
 @dataclass(frozen=True)
@@ -178,14 +181,39 @@ def parse_containers(raw: str) -> list[tuple[str, str]]:
     return pairs
 
 
-def _base(name: str, raw: str) -> str:
+def _base(name: str, raw: str, required: bool = True) -> str:
     base = raw.strip()
     if not base:
+        if not required:
+            return ""
         raise ActionError(f"{name} is required (a registry base, host[:port][/path])")
     problem = base_problem(base)
     if problem:
         raise ActionError(f"{name} '{base}' {problem}")
     return base
+
+
+def _release_tag(raw: str) -> str:
+    release_tag = raw.strip()
+    if not TAG.fullmatch(release_tag):
+        raise ActionError(
+            f"release_tag must be a valid Docker tag; got '{release_tag}'"
+        )
+    if release_tag == "latest":
+        # Release tags are immutable here; 'latest' moves by design,
+        # so every later release would read as a conflict.
+        raise ActionError(
+            "release_tag 'latest' is a moving tag; promote to the release "
+            "version and set push_latest instead"
+        )
+    return release_tag
+
+
+def _refuse(mode: str, names: tuple[str, ...], why: str) -> None:
+    """Refuse any of ``names`` given to ``mode``, which does not use them."""
+    for name in names:
+        if gha.env(f"INPUT_{name.upper()}").strip():
+            raise ActionError(f"{name} does not apply to mode: {mode}, which {why}")
 
 
 def _namespace(raw: str) -> str:
@@ -270,13 +298,13 @@ class Settings:
 
     @property
     def reads(self) -> bool:
-        """Whether the run queries registries (everything but a dry run)."""
-        return not self.dry_run
+        """Whether the run queries registries (not a dry run or validate)."""
+        return not self.dry_run and self.mode != "validate"
 
     @property
     def writes(self) -> bool:
         """Whether the run may change registry state."""
-        return not self.dry_run and self.mode != "verify"
+        return self.reads and self.mode != "verify"
 
     @property
     def moves_latest(self) -> bool:
@@ -295,29 +323,29 @@ class Settings:
         """Read and cross-check the INPUT_* variables."""
         env = gha.env
         mode = _choice("mode", env("INPUT_MODE"), MODES)
-        release_tag = env("INPUT_RELEASE_TAG").strip()
-        if not TAG.fullmatch(release_tag):
-            raise ActionError(
-                f"release_tag must be a valid Docker tag; got '{release_tag}'"
-            )
-        if release_tag == "latest":
-            # Release tags are immutable here; 'latest' moves by design,
-            # so every later release would read as a conflict.
-            raise ActionError(
-                "release_tag 'latest' is a moving tag; promote to the release "
-                "version and set push_latest instead"
-            )
+        # mode: validate names no images, so it has no release tag.
+        release_tag = (
+            "" if mode == "validate" else _release_tag(env("INPUT_RELEASE_TAG"))
+        )
         images: tuple[Pushed, ...] = ()
+        containers: list[Container] = []
+        pull = push = namespace = ""
         if mode == "latest":
-            for name in PROMOTION_INPUTS:
-                if env(f"INPUT_{name.upper()}").strip():
-                    raise ActionError(
-                        f"{name} does not apply to mode: latest, which moves "
-                        "latest for the images already pushed in images_json"
-                    )
+            _refuse(
+                mode,
+                PROMOTION_INPUTS,
+                "moves latest for the images already pushed in images_json",
+            )
             images = tuple(parse_images(env("INPUT_IMAGES_JSON")))
-            pull = push = namespace = ""
-            containers: list[Container] = []
+        elif mode == "validate":
+            _refuse(mode, IMAGE_INPUTS, "checks pull_registry and push_registry alone")
+            pull = _base("pull_registry", env("INPUT_PULL_REGISTRY"), required=False)
+            push = _base("push_registry", env("INPUT_PUSH_REGISTRY"), required=False)
+            if not pull and not push:
+                raise ActionError(
+                    "mode: validate needs pull_registry, push_registry or both; "
+                    "both are empty, so there is nothing to validate"
+                )
         else:
             if env("INPUT_IMAGES_JSON").strip():
                 raise ActionError(

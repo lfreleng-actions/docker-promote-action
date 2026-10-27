@@ -20,6 +20,8 @@
 #
 # mode: latest applies that rule alone to images another tool has
 # already pushed, for the lane that builds and pushes in one job.
+# mode: validate checks the registry bases alone, early in a job, and
+# contacts no registry.
 name: "🐳 Docker Promote"
 description: >
   Promote staged container images to a release registry by digest,
@@ -34,7 +36,8 @@ inputs:
       staged <pull_registry>/<name>:<version> promotes to
       <push_registry>/<name>:<release_tag>. Names are repository paths
       below the registry base (onap/app); names must be unique.
-      Required for modes promote and verify; mode latest refuses it.
+      Required for modes promote and verify; modes latest and validate
+      refuse it.
     required: false
     default: ""
   release_tag:
@@ -42,14 +45,17 @@ inputs:
       The tag every image is released under (the release file's
       container_release_tag). Release tags are treated as immutable,
       so 'latest' is refused; see push_latest. It is also the version
-      latest_policy compares.
-    required: true
+      latest_policy compares. Required for modes promote, verify and
+      latest; mode validate ignores it.
+    required: false
+    default: ""
   pull_registry:
     description: >
       Registry base the staged images are read from: host[:port] with
       an optional repository path, such as nexus3.onap.org:10003 or
       acme.jfrog.io/docker-snapshot. Required for modes promote and
-      verify; mode latest refuses it.
+      verify; mode latest refuses it. Mode validate checks it when
+      set.
     required: false
     default: ""
   push_registry:
@@ -57,6 +63,7 @@ inputs:
       Registry base the release is written to, in the same form, such
       as nexus3.onap.org:10002 or acme.jfrog.io/docker-release.
       Required for modes promote and verify; mode latest refuses it.
+      Mode validate checks it when set.
     required: false
     default: ""
   namespace:
@@ -110,6 +117,12 @@ inputs:
       already pushed (images_json), whatever push_latest says: it
       checks each <image>:<release_tag> holds the digest given, then
       moves each latest the policy allows.
+      'validate' checks each non-empty pull_registry and push_registry
+      and sets pull_endpoint and push_endpoint, for a fail-fast check
+      early in a job; at least one must be set. It never downloads
+      crane, logs in or contacts a registry, whatever install_crane,
+      dry_run or the credentials say, and refuses containers_json,
+      images_json and namespace.
     required: false
     default: "promote"
   dry_run:
@@ -149,7 +162,9 @@ inputs:
     required: false
     default: "true"
   summary:
-    description: "Write a promotion report to the step summary"
+    description: >
+      Write a promotion report to the step summary (mode validate: one
+      line per registry base checked)
     required: false
     default: "true"
 
@@ -181,11 +196,13 @@ outputs:
     value: ${{ steps.promote.outputs.latest_decisions }}
   pull_endpoint:
     description: >
-      Login endpoint (host[:port]) of pull_registry; empty for mode latest
+      Login endpoint (host[:port]) of pull_registry; empty for mode
+      latest, or when pull_registry is empty
     value: ${{ steps.promote.outputs.pull_endpoint }}
   push_endpoint:
     description: >
-      Login endpoint (host[:port]) of push_registry; empty for mode latest
+      Login endpoint (host[:port]) of push_registry; empty for mode
+      latest, or when push_registry is empty
     value: ${{ steps.promote.outputs.push_endpoint }}
 
 runs:

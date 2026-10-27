@@ -26,6 +26,9 @@ mode: latest runs the third phase alone, for images already pushed
 under release_tag by another tool: it checks that each image's
 release tag holds the digest given, then decides and moves.
 
+mode: validate runs no phase: it checks the registry bases alone and
+reports their login endpoints, contacting no registry.
+
 A destination already holding the source digest is 'skipped': the
 release happened before, as global-jjb's container release job finds
 when it re-runs. A source that is the destination itself (the staged
@@ -46,6 +49,7 @@ from scripts import gha, install
 from scripts.crane import Crane
 from scripts.gha import ActionError
 from scripts.latest_phase import LatestPhase
+from scripts.refs import login_endpoint
 from scripts.settings import Container, Settings
 
 # Statuses that count as released, and so may carry 'latest'.
@@ -92,6 +96,9 @@ class Promotion:
 
     def run(self) -> bool:
         """Run every phase the settings call for; True on success."""
+        if self.settings.mode == "validate":
+            # Settings.from_env has already checked the bases.
+            return True
         for container in self._same_reference():
             gha.annotate(
                 "notice",
@@ -246,18 +253,16 @@ class Promotion:
     def outputs(self) -> dict[str, str]:
         """The step outputs, written whether or not the run succeeded."""
         statuses = [result.status for result in self.results]
-        # mode: latest has no pull or push registry, only image hosts.
-        endpoints = (
-            ("", "") if self.settings.mode == "latest" else self.settings.endpoints
-        )
         return {
             "promoted": _compact([result.record() for result in self.results]),
             "promoted_count": str(statuses.count("promoted")),
             "skipped_count": str(statuses.count("skipped")),
             "latest": _compact(self.latest),
             "latest_decisions": _compact(self.phase.records()),
-            "pull_endpoint": endpoints[0],
-            "push_endpoint": endpoints[-1],
+            # Empty for an empty base: mode: latest has none, and
+            # mode: validate may be given one.
+            "pull_endpoint": login_endpoint(self.settings.pull_registry),
+            "push_endpoint": login_endpoint(self.settings.push_registry),
         }
 
     def _same_reference(self) -> list[Container]:
@@ -274,10 +279,23 @@ class Promotion:
         ]
         return lines + [f"- `{c.name}`: `{c.destination}`" for c in same]
 
+    def _validation_summary(self) -> str:
+        lines = ["## Registry Validation", ""]
+        for name in ("pull_registry", "push_registry"):
+            base = getattr(self.settings, name)
+            if base:
+                lines.append(
+                    f"- `{name}` `{base}` is valid; login endpoint "
+                    f"`{login_endpoint(base)}`"
+                )
+        return "\n".join(lines) + "\n\n"
+
     def summary(self) -> str:
         """The step summary in Markdown."""
         if self.settings.mode == "latest":
             return self.phase.summary()
+        if self.settings.mode == "validate":
+            return self._validation_summary()
         lines = ["## Release Promotion", ""]
         if self.settings.dry_run:
             # The lane's dry-run summary, verbatim, then any notice and
@@ -375,7 +393,7 @@ def main() -> int:
         return 1
     promotion = Promotion(settings, None)
     try:
-        if settings.dry_run:
+        if not settings.reads:
             ok = promotion.run()
         else:
             runner_temp = gha.env("RUNNER_TEMP") or None

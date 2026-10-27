@@ -1058,7 +1058,6 @@ class ValidateModeTest(SandboxTestCase):
         self.assertEqual(len(errors), 1, run.annotations)
         self.assertIn(message, errors[0])
 
-    @unittest.expectedFailure
     def test_valid_bases_output_endpoints(self) -> None:
         run = self.validate(
             pull_registry="acme.jfrog.io/docker-snapshot",
@@ -1075,7 +1074,6 @@ class ValidateModeTest(SandboxTestCase):
         )
         self.assertIn(f"`push_registry` `{PUSH}` is valid", run.summary)
 
-    @unittest.expectedFailure
     def test_invalid_base_named_and_quoted(self) -> None:
         bad = "acme.jfrog.io/Docker-Release"
         for key in ("pull_registry", "push_registry"):
@@ -1085,7 +1083,6 @@ class ValidateModeTest(SandboxTestCase):
                     **{"pull_registry": PULL, "push_registry": PUSH, key: bad},
                 )
 
-    @unittest.expectedFailure
     def test_one_base_empty(self) -> None:
         for key, other in (
             ("pull_registry", "push_registry"),
@@ -1101,7 +1098,6 @@ class ValidateModeTest(SandboxTestCase):
                 self.assertIn(f"`{key}`", run.summary)
                 self.assertNotIn(f"`{other}`", run.summary)
 
-    @unittest.expectedFailure
     def test_both_bases_empty_refused(self) -> None:
         self.refused("mode: validate needs pull_registry, push_registry or both")
         self.refused(
@@ -1110,7 +1106,6 @@ class ValidateModeTest(SandboxTestCase):
             push_registry="",
         )
 
-    @unittest.expectedFailure
     def test_inputs_of_other_modes_refused(self) -> None:
         others = {
             "containers_json": containers(("app", "1-s")),
@@ -1124,7 +1119,6 @@ class ValidateModeTest(SandboxTestCase):
                     **{"pull_registry": PULL, key: value},
                 )
 
-    @unittest.expectedFailure
     def test_never_installs_crane_logs_in_or_reads(self) -> None:
         self.sandbox.seed(protected={PULL: "robot:s3cret", PUSH: "robot:s3cret"})
         for dry_run in ("false", "true"):
@@ -1146,7 +1140,6 @@ class ValidateModeTest(SandboxTestCase):
                 self.assertEqual(run.calls, [])
                 self.assertEqual(list(self.sandbox.temp.iterdir()), [])
 
-    @unittest.expectedFailure
     def test_summary_optional(self) -> None:
         run = self.validate(pull_registry=PULL, summary="false")
         self.assertEqual(run.status, 0, run.stdout)
