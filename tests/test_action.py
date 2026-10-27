@@ -156,9 +156,38 @@ class ValidationTest(SandboxTestCase):
             "localhost",
             "[::1]:5000",
             "ghcr.io/org/a.b_c__d-e",
+            "acme.jfrog.io/docker-release",
+            f"{'a' * 63}.example:5000",
+            "registry:5000",
+            "nexus3.onap.org:65535",
+            # Leading zeros still read as decimal.
+            "nexus3.onap.org:08080",
+            "localhost/team",
+            "linuxfoundation.jfrog.io/docker-local",
         ):
             with self.subTest(base=base):
                 self.assertIsNone(base_problem(base))
+
+    @unittest.expectedFailure
+    def test_base_problem_refuses_what_the_lanes_refuse(self) -> None:
+        cases = {
+            "https://nexus3.onap.org:10002": "invalid registry host",
+            "acme.jfrog.io/Docker-Release": "invalid repository path",
+            "nexus3.onap.org:10002/": "ends with '/'",
+            "nexus3..onap.org:10002": "invalid registry host",
+            ".": "invalid registry host",
+            f"{'a' * 64}.example:5000": "invalid registry host",
+            "registry/team": "not a registry host",
+            "nexus3.onap.org:0": "invalid registry host",
+            "nexus3.onap.org:65536": "invalid registry host",
+            "nexus3.onap.org:123456": "invalid registry host",
+            "nexus3.onap.org:000080": "invalid registry host",
+            "nexus3.onap.org:99999999999999999999": "invalid registry host",
+            "acme.jfrog.io:70000/docker-release": "invalid registry host",
+        }
+        for base, message in cases.items():
+            with self.subTest(base=base):
+                self.assertIn(message, base_problem(base) or "")
 
     def test_login_endpoint(self) -> None:
         self.assertEqual(
