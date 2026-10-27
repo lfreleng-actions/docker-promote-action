@@ -91,6 +91,9 @@ inputs:
       mode latest only: JSON array of {image, digest} objects, the
       images already pushed under release_tag (other keys are ignored,
       so docker-workflows' build job's pushed output fits as is).
+      Entries naming one repository with one digest collapse to the
+      first, so latest moves once; two digests for one repository are
+      refused.
     required: false
     default: ""
 

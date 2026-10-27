@@ -113,21 +113,25 @@ def parse_images(raw: str) -> list[Pushed]:
         raise ActionError(IMAGES_ERROR) from err
     if not isinstance(data, list) or not data:
         raise ActionError(IMAGES_ERROR)
-    images: list[Pushed] = []
+    # One entry per repository, the first given. A build pushing one
+    # image to one repository twice lists it twice, and both entries
+    # name the same 'latest' move; two digests would be two targets.
+    images: dict[str, Pushed] = {}
+    conflicts: set[str] = set()
     for index, entry in enumerate(data):
         problem = _image_problem(entry)
         if problem:
             raise ActionError(f"{IMAGES_ERROR}; entry #{index + 1} {problem}")
-        images.append(Pushed(entry["image"], entry["digest"]))
-    repositories = [canonical_repository(image.image) for image in images]
-    duplicates = sorted({r for r in repositories if repositories.count(r) > 1})
-    if duplicates:
-        # Each repository has one 'latest'.
+        repository = canonical_repository(entry["image"])
+        first = images.setdefault(repository, Pushed(entry["image"], entry["digest"]))
+        if first.digest != entry["digest"]:
+            conflicts.add(repository)
+    if conflicts:
         raise ActionError(
-            f"images_json names {', '.join(duplicates)} more than once; each "
-            "repository has one latest"
+            f"images_json gives {', '.join(sorted(conflicts))} more than one "
+            "digest; each repository has one latest"
         )
-    return images
+    return list(images.values())
 
 
 def _container_problem(entry: object) -> str | None:
