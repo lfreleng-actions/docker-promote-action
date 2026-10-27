@@ -132,7 +132,7 @@ Images on more than one registry host, such as `ghcr.io` and
 | namespace         | False           |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)                           |
 | push_latest       | False           | `false`   | Also point each image's `latest` at its release digest, after every image has released, as latest_policy allows                            |
 | latest_policy     | False           | `highest` | `highest`: move `latest` for a release at least the highest already there, never a lower one; `always`: move it regardless, with a warning |
-| images_json       | Latest          |           | For mode `latest`: JSON array of `{image, digest}` objects already pushed under release_tag; the action ignores other keys                 |
+| images_json       | Latest          |           | For mode `latest`: JSON array of `{image, digest}` objects pushed under release_tag; other keys ignored. Repeats collapse if digests agree |
 | mode              | False           | `promote` | `promote`; `verify`: read every source and destination, write nothing; `latest`: apply latest_policy to images_json alone                  |
 | dry_run           | False           | `false`   | Print the plan without contacting any registry                                                                                             |
 | on_conflict       | False           | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                                            |
@@ -214,7 +214,13 @@ A `promoted` entry's `status` is one of:
 
 `mode: latest` runs the third phase alone. It first checks that each
 `<image>:<release_tag>` in `images_json` holds the digest given, then
-decides and moves each `latest` by that digest.
+decides and moves each `latest` by that digest. Entries naming one
+repository, in any form that resolves to it (`GHCR.io/org/app` and
+`ghcr.io/org/app`, `docker.io/app` and `index.docker.io/library/app`),
+collapse to the first when they give one digest, so that repository's
+`latest` moves once: a build pushing one image to one repository twice
+lists it twice. Two digests for one repository are two `latest`
+targets, and the action refuses them.
 
 ### Latest policy
 

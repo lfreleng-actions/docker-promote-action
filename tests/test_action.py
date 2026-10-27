@@ -960,7 +960,6 @@ class LatestModeTest(SandboxTestCase):
                     message, mode="latest", images_json=raw, release_tag="2.0.1"
                 )
 
-    @unittest.expectedFailure
     def test_two_digests_for_one_repository_refused(self) -> None:
         # One repository has one latest, so two digests conflict, in
         # any spelling of the repository.
@@ -983,15 +982,12 @@ class LatestModeTest(SandboxTestCase):
         self.assertEqual(decided(run), [(images[0], "2.0.1", True, True)])
         self.assertEqual(run.json("latest"), [f"{images[0]}:latest"])
 
-    @unittest.expectedFailure
     def test_identical_entries_move_latest_once(self) -> None:
         self.moved_once(GHCR, GHCR)
 
-    @unittest.expectedFailure
     def test_host_case_variants_move_latest_once(self) -> None:
         self.moved_once(GHCR, GHCR.replace("ghcr.io", "GHCR.io"))
 
-    @unittest.expectedFailure
     def test_docker_hub_forms_move_latest_once(self) -> None:
         self.moved_once("docker.io/library/app", "index.docker.io/app")
 
