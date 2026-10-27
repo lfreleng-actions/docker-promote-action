@@ -953,13 +953,47 @@ class LatestModeTest(SandboxTestCase):
             json.dumps([{**good, "image": f"{GHCR}:1.0"}]): "not an image repository",
             json.dumps([{**good, "image": "onap/app"}]): "not an image repository",
             json.dumps([{**good, "image": "ghcr.io"}]): "not an image repository",
-            json.dumps([good, good]): "more than once",
         }
         for raw, message in cases.items():
             with self.subTest(images_json=raw):
                 self.refused(
                     message, mode="latest", images_json=raw, release_tag="2.0.1"
                 )
+
+    @unittest.expectedFailure
+    def test_two_digests_for_one_repository_refused(self) -> None:
+        # One repository has one latest, so two digests conflict, in
+        # any spelling of the repository.
+        for image in (GHCR, GHCR.replace("ghcr.io", "GHCR.io")):
+            with self.subTest(image=image):
+                self.refused(
+                    f"images_json gives {GHCR} more than one digest",
+                    mode="latest",
+                    images_json=pushed((GHCR, digest("app")), (image, digest("b"))),
+                    release_tag="2.0.1",
+                )
+
+    def moved_once(self, *images: str) -> None:
+        """Entries naming one repository, canonical form first, move it once."""
+        staged = self.sandbox.stage(f"{images[0]}:2.0.1", "app 2.0.1")
+        run = self.latest(pushed(*((image, staged) for image in images)))
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.mutations, [["tag", f"{images[0]}@{staged}", "latest"]])
+        self.assertEqual(run.tags[f"{images[0]}:latest"], staged)
+        self.assertEqual(decided(run), [(images[0], "2.0.1", True, True)])
+        self.assertEqual(run.json("latest"), [f"{images[0]}:latest"])
+
+    @unittest.expectedFailure
+    def test_identical_entries_move_latest_once(self) -> None:
+        self.moved_once(GHCR, GHCR)
+
+    @unittest.expectedFailure
+    def test_host_case_variants_move_latest_once(self) -> None:
+        self.moved_once(GHCR, GHCR.replace("ghcr.io", "GHCR.io"))
+
+    @unittest.expectedFailure
+    def test_docker_hub_forms_move_latest_once(self) -> None:
+        self.moved_once("docker.io/library/app", "index.docker.io/app")
 
     def test_inputs_of_other_modes_refused(self) -> None:
         images = pushed((GHCR, digest("app")))
