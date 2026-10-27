@@ -1044,6 +1044,115 @@ class LatestModeTest(SandboxTestCase):
         )
 
 
+class ValidateModeTest(SandboxTestCase):
+    """mode: validate checks registry bases alone, contacting nothing."""
+
+    def validate(self, **extra: str) -> Any:
+        return run_action(self.sandbox, mode="validate", **extra)
+
+    def refused(self, message: str, **extra: str) -> None:
+        run = self.validate(**extra)
+        self.assertEqual(run.status, 1, run.stdout)
+        self.assertEqual(run.calls, [], "a registry was contacted")
+        errors = [a for a in run.annotations if a.startswith("::error::")]
+        self.assertEqual(len(errors), 1, run.annotations)
+        self.assertIn(message, errors[0])
+
+    @unittest.expectedFailure
+    def test_valid_bases_output_endpoints(self) -> None:
+        run = self.validate(
+            pull_registry="acme.jfrog.io/docker-snapshot",
+            push_registry=PUSH,
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(
+            (run.outputs["pull_endpoint"], run.outputs["push_endpoint"]),
+            ("acme.jfrog.io", PUSH),
+        )
+        self.assertIn(
+            "`pull_registry` `acme.jfrog.io/docker-snapshot` is valid", run.summary
+        )
+        self.assertIn(f"`push_registry` `{PUSH}` is valid", run.summary)
+
+    @unittest.expectedFailure
+    def test_invalid_base_named_and_quoted(self) -> None:
+        bad = "acme.jfrog.io/Docker-Release"
+        for key in ("pull_registry", "push_registry"):
+            with self.subTest(key=key):
+                self.refused(
+                    f"{key} '{bad}' has an invalid repository path",
+                    **{"pull_registry": PULL, "push_registry": PUSH, key: bad},
+                )
+
+    @unittest.expectedFailure
+    def test_one_base_empty(self) -> None:
+        for key, other in (
+            ("pull_registry", "push_registry"),
+            ("push_registry", "pull_registry"),
+        ):
+            with self.subTest(key=key):
+                run = self.validate(**{key: PULL})
+                self.assertEqual(run.status, 0, run.stdout)
+                self.assertEqual(run.calls, [])
+                endpoint = key.replace("registry", "endpoint")
+                self.assertEqual(run.outputs[endpoint], PULL)
+                self.assertEqual(run.outputs[other.replace("registry", "endpoint")], "")
+                self.assertIn(f"`{key}`", run.summary)
+                self.assertNotIn(f"`{other}`", run.summary)
+
+    @unittest.expectedFailure
+    def test_both_bases_empty_refused(self) -> None:
+        self.refused("mode: validate needs pull_registry, push_registry or both")
+        self.refused(
+            "mode: validate needs pull_registry, push_registry or both",
+            pull_registry="  ",
+            push_registry="",
+        )
+
+    @unittest.expectedFailure
+    def test_inputs_of_other_modes_refused(self) -> None:
+        others = {
+            "containers_json": containers(("app", "1-s")),
+            "images_json": pushed((GHCR, digest("app"))),
+            "namespace": "onap",
+        }
+        for key, value in others.items():
+            with self.subTest(key=key):
+                self.refused(
+                    f"{key} does not apply to mode: validate",
+                    **{"pull_registry": PULL, key: value},
+                )
+
+    @unittest.expectedFailure
+    def test_never_installs_crane_logs_in_or_reads(self) -> None:
+        self.sandbox.seed(protected={PULL: "robot:s3cret", PUSH: "robot:s3cret"})
+        for dry_run in ("false", "true"):
+            with self.subTest(dry_run=dry_run):
+                # A crane download would fail through this proxy.
+                run = run_action(
+                    self.sandbox,
+                    {"https_proxy": "http://127.0.0.1:9"},
+                    mode="validate",
+                    pull_registry=PULL,
+                    push_registry=PUSH,
+                    install_crane="true",
+                    dry_run=dry_run,
+                    push_latest="true",
+                    registry_user="robot",
+                    registry_password="s3cret",
+                )
+                self.assertEqual(run.status, 0, run.stdout)
+                self.assertEqual(run.calls, [])
+                self.assertEqual(list(self.sandbox.temp.iterdir()), [])
+
+    @unittest.expectedFailure
+    def test_summary_optional(self) -> None:
+        run = self.validate(pull_registry=PULL, summary="false")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.summary, "")
+
+
 class SameReferenceTest(SandboxTestCase):
     """A release file naming the release itself: skipped, with a notice."""
 
