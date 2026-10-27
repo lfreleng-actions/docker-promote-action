@@ -168,7 +168,6 @@ class ValidationTest(SandboxTestCase):
             with self.subTest(base=base):
                 self.assertIsNone(base_problem(base))
 
-    @unittest.expectedFailure
     def test_base_problem_refuses_what_the_lanes_refuse(self) -> None:
         cases = {
             "https://nexus3.onap.org:10002": "invalid registry host",
