@@ -156,9 +156,37 @@ class ValidationTest(SandboxTestCase):
             "localhost",
             "[::1]:5000",
             "ghcr.io/org/a.b_c__d-e",
+            "acme.jfrog.io/docker-release",
+            f"{'a' * 63}.example:5000",
+            "registry:5000",
+            "nexus3.onap.org:65535",
+            # Leading zeros still read as decimal.
+            "nexus3.onap.org:08080",
+            "localhost/team",
+            "linuxfoundation.jfrog.io/docker-local",
         ):
             with self.subTest(base=base):
                 self.assertIsNone(base_problem(base))
+
+    def test_base_problem_refuses_what_the_lanes_refuse(self) -> None:
+        cases = {
+            "https://nexus3.onap.org:10002": "invalid registry host",
+            "acme.jfrog.io/Docker-Release": "invalid repository path",
+            "nexus3.onap.org:10002/": "ends with '/'",
+            "nexus3..onap.org:10002": "invalid registry host",
+            ".": "invalid registry host",
+            f"{'a' * 64}.example:5000": "invalid registry host",
+            "registry/team": "not a registry host",
+            "nexus3.onap.org:0": "invalid registry host",
+            "nexus3.onap.org:65536": "invalid registry host",
+            "nexus3.onap.org:123456": "invalid registry host",
+            "nexus3.onap.org:000080": "invalid registry host",
+            "nexus3.onap.org:99999999999999999999": "invalid registry host",
+            "acme.jfrog.io:70000/docker-release": "invalid registry host",
+        }
+        for base, message in cases.items():
+            with self.subTest(base=base):
+                self.assertIn(message, base_problem(base) or "")
 
     def test_login_endpoint(self) -> None:
         self.assertEqual(
@@ -1014,6 +1042,108 @@ class LatestModeTest(SandboxTestCase):
             "images_json applies only to mode: latest",
             **inputs(images_json=images),
         )
+
+
+class ValidateModeTest(SandboxTestCase):
+    """mode: validate checks registry bases alone, contacting nothing."""
+
+    def validate(self, **extra: str) -> Any:
+        return run_action(self.sandbox, mode="validate", **extra)
+
+    def refused(self, message: str, **extra: str) -> None:
+        run = self.validate(**extra)
+        self.assertEqual(run.status, 1, run.stdout)
+        self.assertEqual(run.calls, [], "a registry was contacted")
+        errors = [a for a in run.annotations if a.startswith("::error::")]
+        self.assertEqual(len(errors), 1, run.annotations)
+        self.assertIn(message, errors[0])
+
+    def test_valid_bases_output_endpoints(self) -> None:
+        run = self.validate(
+            pull_registry="acme.jfrog.io/docker-snapshot",
+            push_registry=PUSH,
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(
+            (run.outputs["pull_endpoint"], run.outputs["push_endpoint"]),
+            ("acme.jfrog.io", PUSH),
+        )
+        self.assertIn(
+            "`pull_registry` `acme.jfrog.io/docker-snapshot` is valid", run.summary
+        )
+        self.assertIn(f"`push_registry` `{PUSH}` is valid", run.summary)
+
+    def test_invalid_base_named_and_quoted(self) -> None:
+        bad = "acme.jfrog.io/Docker-Release"
+        for key in ("pull_registry", "push_registry"):
+            with self.subTest(key=key):
+                self.refused(
+                    f"{key} '{bad}' has an invalid repository path",
+                    **{"pull_registry": PULL, "push_registry": PUSH, key: bad},
+                )
+
+    def test_one_base_empty(self) -> None:
+        for key, other in (
+            ("pull_registry", "push_registry"),
+            ("push_registry", "pull_registry"),
+        ):
+            with self.subTest(key=key):
+                run = self.validate(**{key: PULL})
+                self.assertEqual(run.status, 0, run.stdout)
+                self.assertEqual(run.calls, [])
+                endpoint = key.replace("registry", "endpoint")
+                self.assertEqual(run.outputs[endpoint], PULL)
+                self.assertEqual(run.outputs[other.replace("registry", "endpoint")], "")
+                self.assertIn(f"`{key}`", run.summary)
+                self.assertNotIn(f"`{other}`", run.summary)
+
+    def test_both_bases_empty_refused(self) -> None:
+        self.refused("mode: validate needs pull_registry, push_registry or both")
+        self.refused(
+            "mode: validate needs pull_registry, push_registry or both",
+            pull_registry="  ",
+            push_registry="",
+        )
+
+    def test_inputs_of_other_modes_refused(self) -> None:
+        others = {
+            "containers_json": containers(("app", "1-s")),
+            "images_json": pushed((GHCR, digest("app"))),
+            "namespace": "onap",
+        }
+        for key, value in others.items():
+            with self.subTest(key=key):
+                self.refused(
+                    f"{key} does not apply to mode: validate",
+                    **{"pull_registry": PULL, key: value},
+                )
+
+    def test_never_installs_crane_logs_in_or_reads(self) -> None:
+        self.sandbox.seed(protected={PULL: "robot:s3cret", PUSH: "robot:s3cret"})
+        for dry_run in ("false", "true"):
+            with self.subTest(dry_run=dry_run):
+                # A crane download would fail through this proxy.
+                run = run_action(
+                    self.sandbox,
+                    {"https_proxy": "http://127.0.0.1:9"},
+                    mode="validate",
+                    pull_registry=PULL,
+                    push_registry=PUSH,
+                    install_crane="true",
+                    dry_run=dry_run,
+                    push_latest="true",
+                    registry_user="robot",
+                    registry_password="s3cret",
+                )
+                self.assertEqual(run.status, 0, run.stdout)
+                self.assertEqual(run.calls, [])
+                self.assertEqual(list(self.sandbox.temp.iterdir()), [])
+
+    def test_summary_optional(self) -> None:
+        run = self.validate(pull_registry=PULL, summary="false")
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.summary, "")
 
 
 class SameReferenceTest(SandboxTestCase):

@@ -47,6 +47,9 @@ the inline step it:
   `latest_policy: always` (see [Latest policy](#latest-policy)). A
   `latest` mode applies the same rule to images another tool has
   already pushed.
+- **checks registry inputs on their own.** A `validate` mode checks
+  registry bases against the same rule and reports their login
+  endpoints without contacting any registry, so a lane can fail fast.
 
 ## Usage Example
 
@@ -117,29 +120,58 @@ Images on more than one registry host, such as `ghcr.io` and
 `docker.io`, need a login each: log in beforehand and leave
 `registry_user` empty.
 
+### Check registry inputs first
+
+`mode: validate` checks each non-empty registry base and fails naming
+the input and its value; it needs no `release_tag`, and contacts no
+registry. Run it first, so a bad base fails the job before any build,
+and use its endpoint outputs in place of `${BASE%%/*}`.
+
+```yaml
+jobs:
+  build:
+    steps:
+      - id: registries
+        uses: lfreleng-actions/docker-promote-action@<sha>  # vX.Y.Z
+        with:
+          mode: validate
+          pull_registry: ${{ inputs.snapshot_registry }}
+          push_registry: ${{ inputs.release_registry }}
+      - uses: docker/login-action@<sha>  # vX.Y.Z
+        with:
+          registry: ${{ steps.registries.outputs.push_endpoint }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      # ... build and push
+```
+
+The error names the action's input, so a caller mapping its own
+inputs (`snapshot_registry` to `pull_registry`) finds the failing one
+by the value quoted.
+
 <!-- markdownlint-enable MD046 -->
 
 ## Inputs
 
 <!-- markdownlint-disable MD013 -->
 
-| Name              | Required        | Default   | Description                                                                                                                                |
-| ----------------- | --------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| containers_json   | Promote, verify |           | JSON array of `{name, version}` objects, as the check-release job emits; names are repository paths below the registry base                |
-| release_tag       | True            |           | Tag every image releases under; `latest` refused (see push_latest). Also the version latest_policy compares                                |
-| pull_registry     | Promote, verify |           | Registry base staged images come from: `host[:port]` with an optional repository path                                                      |
-| push_registry     | Promote, verify |           | Registry base the release goes to, in the same form                                                                                        |
-| namespace         | False           |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)                           |
-| push_latest       | False           | `false`   | Also point each image's `latest` at its release digest, after every image has released, as latest_policy allows                            |
-| latest_policy     | False           | `highest` | `highest`: move `latest` for a release at least the highest already there, never a lower one; `always`: move it regardless, with a warning |
-| images_json       | Latest          |           | For mode `latest`: JSON array of `{image, digest}` objects pushed under release_tag; other keys ignored. Repeats collapse if digests agree |
-| mode              | False           | `promote` | `promote`; `verify`: read every source and destination, write nothing; `latest`: apply latest_policy to images_json alone                  |
-| dry_run           | False           | `false`   | Print the plan without contacting any registry                                                                                             |
-| on_conflict       | False           | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                                            |
-| registry_user     | False           |           | Username to log in with; empty uses the runner's existing logins                                                                           |
-| registry_password | False           |           | Password or token for registry_user                                                                                                        |
-| install_crane     | False           | `true`    | Download the pinned crane and check its SHA-256; `false` uses crane from PATH                                                              |
-| summary           | False           | `true`    | Write a promotion report to the step summary                                                                                               |
+| Name              | Required                | Default   | Description                                                                                                                                                           |
+| ----------------- | ----------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| containers_json   | Promote, verify         |           | JSON array of `{name, version}` objects, as the check-release job emits; names are repository paths below the registry base                                           |
+| release_tag       | Promote, verify, latest |           | Tag every image releases under; `latest` refused (see push_latest). Also the version latest_policy compares. Mode `validate` ignores it                               |
+| pull_registry     | Promote, verify         |           | Registry base staged images come from: `host[:port]` with an optional repository path. Mode `validate` checks it when set                                             |
+| push_registry     | Promote, verify         |           | Registry base the release goes to, in the same form. Mode `validate` checks it when set                                                                               |
+| namespace         | False                   |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)                                                      |
+| push_latest       | False                   | `false`   | Also point each image's `latest` at its release digest, after every image has released, as latest_policy allows                                                       |
+| latest_policy     | False                   | `highest` | `highest`: move `latest` for a release at least the highest already there, never a lower one; `always`: move it regardless, with a warning                            |
+| images_json       | Latest                  |           | For mode `latest`: JSON array of `{image, digest}` objects pushed under release_tag; other keys ignored. Repeats collapse if digests agree                            |
+| mode              | False                   | `promote` | `promote`; `verify`: read every source and destination, write nothing; `latest`: apply latest_policy to images_json alone; `validate`: check the registry bases alone |
+| dry_run           | False                   | `false`   | Print the plan without contacting any registry                                                                                                                        |
+| on_conflict       | False                   | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                                                                       |
+| registry_user     | False                   |           | Username to log in with; empty uses the runner's existing logins                                                                                                      |
+| registry_password | False                   |           | Password or token for registry_user                                                                                                                                   |
+| install_crane     | False                   | `true`    | Download the pinned crane and check its SHA-256; `false` uses crane from PATH                                                                                         |
+| summary           | False                   | `true`    | Write a promotion report to the step summary                                                                                                                          |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -154,8 +186,8 @@ Images on more than one registry host, such as `ghcr.io` and
 | skipped_count    | Number of images already released with the same digest                                                        |
 | latest           | JSON list of `<image>:latest` references moved (verify and dry runs: that would move)                         |
 | latest_decisions | JSON list, one per image when `latest` is in play: `{image, digest, candidate, highest, move, moved, reason}` |
-| pull_endpoint    | Login endpoint (`host[:port]`) of pull_registry; empty for mode `latest`                                      |
-| push_endpoint    | Login endpoint (`host[:port]`) of push_registry; empty for mode `latest`                                      |
+| pull_endpoint    | Login endpoint (`host[:port]`) of pull_registry; empty for mode `latest` or an empty pull_registry            |
+| push_endpoint    | Login endpoint (`host[:port]`) of push_registry; empty for mode `latest` or an empty push_registry            |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -296,6 +328,21 @@ base's `host[:port]` alone, computed as the lanes compute it
 Image references use the base; logins use the endpoint, published as
 `pull_endpoint` and `push_endpoint` for callers that log in
 themselves.
+
+A base's host must be a registry host, with a `.` or `:` or named
+`localhost` (see [Namespace](#namespace)), made of DNS labels of at
+most 63 characters, each starting and ending with a letter or digit,
+or a bracketed IPv6 address, and an optional port of 1 to 5 decimal
+digits within 1-65535. A repository path follows the grammar
+container names use, and a base never ends with `/`.
+
+`mode: validate` applies this rule alone to each non-empty
+`pull_registry` and `push_registry`, refuses the run when both are
+empty, and sets both endpoint outputs (empty for an empty base). It
+never downloads crane, logs in or reads a registry, so the
+docker-workflows lanes can call it as their fail-fast input check.
+The GHCR and Docker Hub refusal one lane applies to its release
+registry stays in that lane.
 
 ### Namespace
 

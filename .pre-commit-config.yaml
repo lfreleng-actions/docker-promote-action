@@ -194,6 +194,10 @@ repos:
     hooks:
       - id: write-good
         files: "\\.(rst|md|markdown|mdown|mkdn)$"
+        # too-wordy flags 'validate' wherever it appears, code spans
+        # included, and write-good has no inline exemption, so the
+        # README could not name 'mode: validate' with the check on.
+        args: ["--no-tooWordy"]
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: a6564f5d57444e123433a5c9af733e3975c77229  # frozen: v0.11.0.1-1

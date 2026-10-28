@@ -18,10 +18,11 @@ import ipaddress
 import re
 
 _IPV6_HOST = r"\[[0-9A-Fa-f:]+\]"
-_LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
-# Docker's domain grammar: dot-separated labels, each starting and
-# ending alphanumeric with hyphens only inside, and an optional port.
-REGISTRY = re.compile(rf"({_LABEL}([.]{_LABEL})*|{_IPV6_HOST})(:[0-9]+)?")
+_LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+# Docker's domain grammar: dot-separated labels of at most 63
+# characters (DNS's limit), each starting and ending alphanumeric with
+# hyphens only inside, and an optional port of at most 5 digits.
+REGISTRY = re.compile(rf"({_LABEL}([.]{_LABEL})*|{_IPV6_HOST})(:[0-9]{{1,5}})?")
 # One repository path component, and a '/'-separated path of them.
 COMPONENT = re.compile(r"[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*")
 PATH = re.compile(rf"{COMPONENT.pattern}(/{COMPONENT.pattern})*")
@@ -46,7 +47,7 @@ def _valid_ipv6(host: str) -> bool:
 
 
 def _valid_port(host: str) -> bool:
-    """True unless ``host`` carries a port outside 1-65535."""
+    """True unless ``host`` carries a port outside 1-65535, read as decimal."""
     if host.endswith("]") or ":" not in host:
         return True
     return 1 <= int(host.rpartition(":")[2]) <= 65535
