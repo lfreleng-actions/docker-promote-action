@@ -6,7 +6,7 @@ name = "docker-promote-action"
 version = "0.0.0"
 description = "Promote staged container images to a release registry by digest"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 # Standard library only: the composite action runs on the runner's own
 # python3 with no install step.
@@ -17,7 +17,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_unused_ignores = true
 
 [tool.basedpyright]
