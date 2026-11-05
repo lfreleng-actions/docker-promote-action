@@ -468,9 +468,13 @@ step needs: `image` and `digest` for each released image.
 
 ### Development
 
-The action needs Python 3.10 or later, with no dependencies beyond the
-standard library. The tests also need Bash and `jq`, which the vendored
-lane scripts in `tests/legacy/` call.
+The action needs Python 3.11 or later, with no dependencies beyond the
+standard library. It runs on the runner's own `python3`, which every
+current GitHub-hosted image provides at 3.11 or later (`ubuntu-24.04`
+ships 3.12). On a runner whose system `python3` is older, such as
+`ubuntu-22.04` with 3.10, the action fails fast with an error. The
+tests also need Bash and `jq`, which the vendored lane scripts in
+`tests/legacy/` call.
 
 ```shell
 python3 -m unittest discover -s tests -t .

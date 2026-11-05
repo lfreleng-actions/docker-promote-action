@@ -232,9 +232,9 @@ runs:
         # Standard library only, so no setup-python step: GitHub-hosted
         # runners ship a suitable python3. -I (isolated mode) keeps the
         # caller's checkout off sys.path; see entrypoint.py.
-        if ! python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
+        if ! python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
           > /dev/null 2>&1; then
-          echo "::error::python3 3.10 or later is required on the runner"
+          echo "::error::python3 3.11 or later is required on the runner"
           exit 1
         fi
         python3 -I "${GITHUB_ACTION_PATH}/entrypoint.py"
