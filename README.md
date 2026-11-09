@@ -50,6 +50,10 @@ the inline step it:
 - **checks registry inputs on their own.** A `validate` mode checks
   registry bases against the same rule and reports their login
   endpoints without contacting any registry, so a lane can fail fast.
+- **resolves the image namespace.** A `namespace` mode applies the
+  lanes' namespace rule in tested code, without contacting any
+  registry (see
+  [Resolving the image namespace](#resolving-the-image-namespace)).
 
 ## Usage Example
 
@@ -149,29 +153,70 @@ The error names the action's input, so a caller mapping its own
 inputs (`snapshot_registry` to `pull_registry`) finds the failing one
 by the value quoted.
 
+### Resolving the image namespace
+
+`mode: namespace` replaces the lanes' "Resolve image namespace" step.
+It sets the `namespace` output and writes `Image namespace (<mode>):
+<namespace>` to the step summary. Like `validate`, it needs no
+`release_tag`, never downloads crane, logs in or contacts a registry,
+and refuses `containers_json`, `images_json`, `pull_registry` and
+`push_registry`. It ignores `registry_user` and `registry_password`,
+whatever they hold, and reads `namespace` and `repository` as given,
+untrimmed, as the lanes' step did.
+
+- `namespace_mode: none`, the default, resolves to an empty namespace.
+- `namespace_mode: auto` resolves to the owner part of `repository`,
+  lowercased by mapping `A`-`Z` to `a`-`z` alone. Python's
+  `str.lower()` would turn some non-ASCII letters, such as the Kelvin
+  sign, into ASCII ones and accept an owner the caller never wrote.
+- `namespace_mode: manual` resolves to the `namespace` input as given.
+
+The checks run in this order, each failing with an error annotation:
+`namespace` set while `namespace_mode` is not `manual`; `manual` with
+an empty `namespace`; a resolved namespace outside the repository path
+grammar (see [Namespace](#namespace)); and, with `dockerhub_publish:
+true`, a namespace that is empty or holds a `/`, since Docker Hub takes
+one organisation or user. Any other `namespace_mode`, an explicit empty
+one included, fails too.
+
+```yaml
+- id: namespace
+  uses: lfreleng-actions/docker-promote-action@<sha>  # vX.Y.Z
+  with:
+    mode: namespace
+    namespace_mode: ${{ inputs.namespace_mode }}
+    namespace: ${{ inputs.namespace }}
+    repository: ${{ github.repository }}
+    dockerhub_publish: ${{ inputs.dockerhub_publish }}
+# steps.namespace.outputs.namespace: acme
+```
+
 <!-- markdownlint-enable MD046 -->
 
 ## Inputs
 
 <!-- markdownlint-disable MD013 -->
 
-| Name              | Required                | Default   | Description                                                                                                                                                           |
-| ----------------- | ----------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| containers_json   | Promote, verify         |           | JSON array of `{name, version}` objects, as the check-release job emits; names are repository paths below the registry base                                           |
-| release_tag       | Promote, verify, latest |           | Tag every image releases under; `latest` refused (see push_latest). Also the version latest_policy compares. Mode `validate` ignores it                               |
-| pull_registry     | Promote, verify         |           | Registry base staged images come from: `host[:port]` with an optional repository path. Mode `validate` checks it when set                                             |
-| push_registry     | Promote, verify         |           | Registry base the release goes to, in the same form. Mode `validate` checks it when set                                                                               |
-| namespace         | False                   |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace)                                                      |
-| push_latest       | False                   | `false`   | Also point each image's `latest` at its release digest, after every image has released, as latest_policy allows                                                       |
-| latest_policy     | False                   | `highest` | `highest`: move `latest` for a release at least the highest already there, never a lower one; `always`: move it regardless, with a warning                            |
-| images_json       | Latest                  |           | For mode `latest`: JSON array of `{image, digest}` objects pushed under release_tag; other keys ignored. Repeats collapse if digests agree                            |
-| mode              | False                   | `promote` | `promote`; `verify`: read every source and destination, write nothing; `latest`: apply latest_policy to images_json alone; `validate`: check the registry bases alone |
-| dry_run           | False                   | `false`   | Print the plan without contacting any registry                                                                                                                        |
-| on_conflict       | False                   | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                                                                       |
-| registry_user     | False                   |           | Username to log in with; empty uses the runner's existing logins                                                                                                      |
-| registry_password | False                   |           | Password or token for registry_user                                                                                                                                   |
-| install_crane     | False                   | `true`    | Download the pinned crane and check its SHA-256; `false` uses crane from PATH                                                                                         |
-| summary           | False                   | `true`    | Write a promotion report to the step summary                                                                                                                          |
+| Name              | Required                | Default   | Description                                                                                                                                                                                                           |
+| ----------------- | ----------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| containers_json   | Promote, verify         |           | JSON array of `{name, version}` objects, as the check-release job emits; names are repository paths below the registry base                                                                                           |
+| release_tag       | Promote, verify, latest |           | Tag every image releases under; `latest` refused (see push_latest). Also the version latest_policy compares. Modes `validate` and `namespace` ignore it                                                               |
+| pull_registry     | Promote, verify         |           | Registry base staged images come from: `host[:port]` with an optional repository path. Mode `validate` checks it when set                                                                                             |
+| push_registry     | Promote, verify         |           | Registry base the release goes to, in the same form. Mode `validate` checks it when set                                                                                                                               |
+| namespace         | False                   |           | Repository path between each base and name, on both sides; release-file names are relative to it (see Namespace). Mode `namespace`: the value namespace_mode `manual` resolves to                                     |
+| namespace_mode    | False                   | `none`    | Mode `namespace`: `none` (empty), `auto` (the owner of repository, with A-Z lowercased) or `manual` (the namespace input). Other modes refuse all but `none`                                                          |
+| repository        | False                   |           | Mode `namespace`: `owner/name`, such as `github.repository`, that `auto` takes the owner from. Other modes refuse it                                                                                                  |
+| dockerhub_publish | False                   | `false`   | Mode `namespace`: require one path component, the Docker Hub organisation or user. Other modes refuse `true`                                                                                                          |
+| push_latest       | False                   | `false`   | Also point each image's `latest` at its release digest, after every image has released, as latest_policy allows                                                                                                       |
+| latest_policy     | False                   | `highest` | `highest`: move `latest` for a release at least the highest already there, never a lower one; `always`: move it regardless, with a warning                                                                            |
+| images_json       | Latest                  |           | For mode `latest`: JSON array of `{image, digest}` objects pushed under release_tag; other keys ignored. Repeats collapse if digests agree                                                                            |
+| mode              | False                   | `promote` | `promote`; `verify`: read every source and destination, write nothing; `latest`: apply latest_policy to images_json alone; `validate`: check the registry bases alone; `namespace`: resolve the image namespace alone |
+| dry_run           | False                   | `false`   | Print the plan without contacting any registry                                                                                                                                                                        |
+| on_conflict       | False                   | `fail`    | A release tag holding a different digest: `fail`, or `overwrite` with a warning                                                                                                                                       |
+| registry_user     | False                   |           | Username to log in with; empty uses the runner's existing logins                                                                                                                                                      |
+| registry_password | False                   |           | Password or token for registry_user                                                                                                                                                                                   |
+| install_crane     | False                   | `true`    | Download the pinned crane and check its SHA-256; `false` uses crane from PATH                                                                                                                                         |
+| summary           | False                   | `true`    | Write a promotion report to the step summary (mode `namespace`: the namespace resolved)                                                                                                                               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -179,15 +224,16 @@ by the value quoted.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name             | Description                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| promoted         | JSON list, one per container: `{name, source, destination, image, digest, status}`                            |
-| promoted_count   | Number of images this run copied                                                                              |
-| skipped_count    | Number of images already released with the same digest                                                        |
-| latest           | JSON list of `<image>:latest` references moved (verify and dry runs: that would move)                         |
-| latest_decisions | JSON list, one per image when `latest` is in play: `{image, digest, candidate, highest, move, moved, reason}` |
-| pull_endpoint    | Login endpoint (`host[:port]`) of pull_registry; empty for mode `latest` or an empty pull_registry            |
-| push_endpoint    | Login endpoint (`host[:port]`) of push_registry; empty for mode `latest` or an empty push_registry            |
+| Name             | Description                                                                                                       |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| promoted         | JSON list, one per container: `{name, source, destination, image, digest, status}`                                |
+| promoted_count   | Number of images this run copied                                                                                  |
+| skipped_count    | Number of images already released with the same digest                                                            |
+| latest           | JSON list of `<image>:latest` references moved (verify and dry runs: that would move)                             |
+| latest_decisions | JSON list, one per image when `latest` is in play: `{image, digest, candidate, highest, move, moved, reason}`     |
+| pull_endpoint    | Login endpoint (`host[:port]`) of pull_registry; empty for mode `latest` or an empty pull_registry                |
+| push_endpoint    | Login endpoint (`host[:port]`) of push_registry; empty for mode `latest` or an empty push_registry                |
+| namespace        | Namespace applied: mode `namespace`'s resolved one (empty for `none`); the namespace input for promote and verify |
 
 <!-- markdownlint-enable MD013 -->
 

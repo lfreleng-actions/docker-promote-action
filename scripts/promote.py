@@ -29,6 +29,9 @@ release tag holds the digest given, then decides and moves.
 mode: validate runs no phase: it checks the registry bases alone and
 reports their login endpoints, contacting no registry.
 
+mode: namespace runs no phase either: it resolves the image namespace
+from namespace_mode alone, contacting no registry.
+
 A destination already holding the source digest is 'skipped': the
 release happened before, as global-jjb's container release job finds
 when it re-runs. A source that is the destination itself (the staged
@@ -96,6 +99,10 @@ class Promotion:
 
     def run(self) -> bool:
         """Run every phase the settings call for; True on success."""
+        if self.settings.mode == "namespace":
+            # Settings.from_env has already resolved and checked it.
+            gha.log(self._namespace_line(self.settings.namespace or "<none>"))
+            return True
         if self.settings.mode == "validate":
             # Settings.from_env has already checked the bases.
             return True
@@ -263,6 +270,7 @@ class Promotion:
             # mode: validate may be given one.
             "pull_endpoint": login_endpoint(self.settings.pull_registry),
             "push_endpoint": login_endpoint(self.settings.push_registry),
+            "namespace": self.settings.namespace,
         }
 
     def _same_reference(self) -> list[Container]:
@@ -290,8 +298,17 @@ class Promotion:
                 )
         return "\n".join(lines) + "\n\n"
 
+    def _namespace_line(self, namespace: str) -> str:
+        return f"Image namespace ({self.settings.namespace_mode}): {namespace}"
+
     def summary(self) -> str:
         """The step summary in Markdown."""
+        if self.settings.mode == "namespace":
+            # The namespace matched the path grammar, so only the
+            # placeholder needs escaping.
+            return (
+                self._namespace_line(self.settings.namespace or "&lt;none&gt;") + "\n\n"
+            )
         if self.settings.mode == "latest":
             return self.phase.summary()
         if self.settings.mode == "validate":
@@ -385,7 +402,9 @@ def _crane(settings: Settings, work: str) -> Crane:
 def main() -> int:
     """Run the action; returns the process exit status."""
     # Masked before anything else can print, an error message included.
-    gha.mask(gha.env("INPUT_REGISTRY_PASSWORD"))
+    # mode: namespace never reads the credentials, so it masks nothing.
+    if gha.env("INPUT_MODE").strip() != "namespace":
+        gha.mask(gha.env("INPUT_REGISTRY_PASSWORD"))
     try:
         settings = Settings.from_env()
     except ActionError as err:

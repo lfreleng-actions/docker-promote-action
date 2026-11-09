@@ -1178,12 +1178,10 @@ class NamespaceModeTest(SandboxTestCase):
         self.assertEqual(len(errors), 1, run.annotations)
         self.assertIn(message, errors[0])
 
-    @unittest.expectedFailure
     def test_none(self) -> None:
         self.resolved("")
         self.resolved("", namespace_mode="none", repository="Acme/app")
 
-    @unittest.expectedFailure
     def test_namespace_without_manual_refused(self) -> None:
         for mode in ("none", "auto"):
             with self.subTest(mode=mode):
@@ -1194,7 +1192,6 @@ class NamespaceModeTest(SandboxTestCase):
                     repository="acme/app",
                 )
 
-    @unittest.expectedFailure
     def test_auto_is_the_owner_lowercased(self) -> None:
         for repository, expected in (
             ("Acme/app", "acme"),
@@ -1204,7 +1201,6 @@ class NamespaceModeTest(SandboxTestCase):
             with self.subTest(repository=repository):
                 self.resolved(expected, namespace_mode="auto", repository=repository)
 
-    @unittest.expectedFailure
     def test_auto_owner_outside_the_grammar_refused(self) -> None:
         for repository, owner in (
             ("acme_/x", "acme_"),
@@ -1219,7 +1215,6 @@ class NamespaceModeTest(SandboxTestCase):
                     repository=repository,
                 )
 
-    @unittest.expectedFailure
     def test_auto_needs_a_repository(self) -> None:
         for repository in ("", "acme", "/app"):
             with self.subTest(repository=repository):
@@ -1229,13 +1224,11 @@ class NamespaceModeTest(SandboxTestCase):
                     repository=repository,
                 )
 
-    @unittest.expectedFailure
     def test_manual_accepted(self) -> None:
         for namespace in ("team/api", "team", "a__b", "a_b", "a--b", "a.b"):
             with self.subTest(namespace=namespace):
                 self.resolved(namespace, namespace_mode="manual", namespace=namespace)
 
-    @unittest.expectedFailure
     def test_manual_outside_the_grammar_refused(self) -> None:
         for namespace in ("Team", "/team", "team/", "team//api", "a___b"):
             with self.subTest(namespace=namespace):
@@ -1245,14 +1238,12 @@ class NamespaceModeTest(SandboxTestCase):
                     namespace=namespace,
                 )
 
-    @unittest.expectedFailure
     def test_manual_needs_a_namespace(self) -> None:
         self.refused(
             "namespace_mode 'manual' requires the namespace input",
             namespace_mode="manual",
         )
 
-    @unittest.expectedFailure
     def test_invalid_namespace_mode_refused(self) -> None:
         for mode in ("automatic", "", "Auto", " auto"):
             with self.subTest(mode=mode):
@@ -1261,7 +1252,6 @@ class NamespaceModeTest(SandboxTestCase):
                     namespace_mode=mode,
                 )
 
-    @unittest.expectedFailure
     def test_dockerhub_publish(self) -> None:
         self.resolved(
             "team", namespace_mode="manual", namespace="team", dockerhub_publish="true"
@@ -1284,7 +1274,6 @@ class NamespaceModeTest(SandboxTestCase):
             dockerhub_publish="true",
         )
 
-    @unittest.expectedFailure
     def test_dockerhub_publish_is_a_strict_boolean(self) -> None:
         self.refused(
             "dockerhub_publish must be 'true' or 'false', got 'maybe'",
@@ -1293,7 +1282,6 @@ class NamespaceModeTest(SandboxTestCase):
             dockerhub_publish="maybe",
         )
 
-    @unittest.expectedFailure
     def test_inputs_of_other_modes_refused(self) -> None:
         others = {
             "containers_json": containers(("app", "1-s")),
@@ -1305,7 +1293,6 @@ class NamespaceModeTest(SandboxTestCase):
             with self.subTest(key=key):
                 self.refused(f"{key} does not apply to mode: namespace", **{key: value})
 
-    @unittest.expectedFailure
     def test_never_installs_crane_logs_in_or_reads(self) -> None:
         self.sandbox.seed(protected={PULL: "robot:s3cret"})
         for install_crane, dry_run in (("false", "false"), ("true", "true")):
@@ -1328,7 +1315,6 @@ class NamespaceModeTest(SandboxTestCase):
                 self.assertEqual(run.calls, [])
                 self.assertEqual(list(self.sandbox.temp.iterdir()), [])
 
-    @unittest.expectedFailure
     def test_whitespace_kept(self) -> None:
         # The lanes read namespace and repository untrimmed.
         for mode in ("none", "auto"):
@@ -1350,7 +1336,6 @@ class NamespaceModeTest(SandboxTestCase):
             repository=" Acme/app",
         )
 
-    @unittest.expectedFailure
     def test_credentials_ignored(self) -> None:
         for credentials in (
             {"registry_user": "robot"},
@@ -1371,7 +1356,6 @@ class NamespaceModeTest(SandboxTestCase):
         self.assertEqual(run.status, 0, run.stdout)
         self.assertNotIn("::add-mask::s3cret", run.annotations)
 
-    @unittest.expectedFailure
     def test_summary_optional(self) -> None:
         run = self.resolve(
             namespace_mode="auto", repository="acme/app", summary="false"
@@ -1380,7 +1364,6 @@ class NamespaceModeTest(SandboxTestCase):
         self.assertEqual(run.outputs["namespace"], "acme")
         self.assertEqual(run.summary, "")
 
-    @unittest.expectedFailure
     def test_namespace_inputs_refused_by_other_modes(self) -> None:
         for key, value in (
             ("namespace_mode", "auto"),
