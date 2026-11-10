@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from scripts import gha
+from scripts import gha, image_namespace
 from scripts.gha import ActionError
 from scripts.latest import POLICIES
 from scripts.refs import (
@@ -27,8 +27,11 @@ from scripts.refs import (
 )
 
 # 'latest' applies the latest rule alone, to images already pushed;
-# 'validate' checks the registry bases alone.
-MODES = ("promote", "verify", "latest", "validate")
+# 'validate' checks the registry bases alone; 'namespace' resolves the
+# image namespace alone.
+MODES = ("promote", "verify", "latest", "validate", "namespace")
+# Modes that contact no registry, whatever dry_run says.
+OFFLINE_MODES = ("validate", "namespace")
 ON_CONFLICT = ("fail", "overwrite")
 # The lanes' constraint: registry accounts use '@' and '+' (Artifactory
 # SaaS identities are often email addresses).
@@ -216,17 +219,6 @@ def _refuse(mode: str, names: tuple[str, ...], why: str) -> None:
             raise ActionError(f"{name} does not apply to mode: {mode}, which {why}")
 
 
-def _namespace(raw: str) -> str:
-    namespace = raw.strip()
-    if namespace and not PATH.fullmatch(namespace):
-        raise ActionError(
-            f"namespace '{namespace}' is not a repository path (lowercase "
-            "alphanumeric runs joined by '.', '_', '__' or '-', in '/'-separated "
-            "parts, with no leading, trailing or doubled '/')"
-        )
-    return namespace
-
-
 def _choice(name: str, raw: str, choices: tuple[str, ...]) -> str:
     value = raw.strip() or choices[0]
     if value not in choices:
@@ -284,6 +276,7 @@ class Settings:
     summary: bool = True
     # mode: latest's subjects, in place of containers.
     images: tuple[Pushed, ...] = ()
+    namespace_mode: str = "none"
 
     @property
     def endpoints(self) -> tuple[str, ...]:
@@ -298,8 +291,8 @@ class Settings:
 
     @property
     def reads(self) -> bool:
-        """Whether the run queries registries (not a dry run or validate)."""
-        return not self.dry_run and self.mode != "validate"
+        """Whether the run queries registries (not a dry run, validate or namespace)."""
+        return not self.dry_run and self.mode not in OFFLINE_MODES
 
     @property
     def writes(self) -> bool:
@@ -323,13 +316,19 @@ class Settings:
         """Read and cross-check the INPUT_* variables."""
         env = gha.env
         mode = _choice("mode", env("INPUT_MODE"), MODES)
-        # mode: validate names no images, so it has no release tag.
+        # mode: validate and mode: namespace name no images: no release tag.
         release_tag = (
-            "" if mode == "validate" else _release_tag(env("INPUT_RELEASE_TAG"))
+            "" if mode in OFFLINE_MODES else _release_tag(env("INPUT_RELEASE_TAG"))
         )
         images: tuple[Pushed, ...] = ()
         containers: list[Container] = []
         pull = push = namespace = ""
+        rule = "none"
+        if mode == "namespace":
+            _refuse(mode, image_namespace.REFUSED, "resolves the image namespace alone")
+            rule, namespace = image_namespace.read()
+        else:
+            image_namespace.refuse_inputs()
         if mode == "latest":
             _refuse(
                 mode,
@@ -346,7 +345,7 @@ class Settings:
                     "mode: validate needs pull_registry, push_registry or both; "
                     "both are empty, so there is nothing to validate"
                 )
-        else:
+        elif mode != "namespace":
             if env("INPUT_IMAGES_JSON").strip():
                 raise ActionError(
                     "images_json applies only to mode: latest; promote and verify "
@@ -354,8 +353,14 @@ class Settings:
                 )
             pull = _base("pull_registry", env("INPUT_PULL_REGISTRY"))
             push = _base("push_registry", env("INPUT_PUSH_REGISTRY"))
-            namespace = _namespace(env("INPUT_NAMESPACE"))
+            namespace = image_namespace.check(env("INPUT_NAMESPACE").strip())
             containers = _containers(pull, push, namespace, release_tag)
+        # mode: namespace logs in nowhere, so it ignores the credentials,
+        # whatever they hold, rather than refuse an incomplete pair.
+        user = password = ""
+        if mode != "namespace":
+            user = env("INPUT_REGISTRY_USER").strip()
+            password = env("INPUT_REGISTRY_PASSWORD")
         settings = cls(
             containers=tuple(containers),
             release_tag=release_tag,
@@ -369,11 +374,12 @@ class Settings:
             dry_run=gha.env_bool("INPUT_DRY_RUN", "dry_run", False),
             mode=mode,
             on_conflict=_choice("on_conflict", env("INPUT_ON_CONFLICT"), ON_CONFLICT),
-            registry_user=env("INPUT_REGISTRY_USER").strip(),
-            registry_password=env("INPUT_REGISTRY_PASSWORD"),
+            registry_user=user,
+            registry_password=password,
             install_crane=gha.env_bool("INPUT_INSTALL_CRANE", "install_crane", True),
             summary=gha.env_bool("INPUT_SUMMARY", "summary", True),
             images=images,
+            namespace_mode=rule,
         )
         settings.check()
         return settings

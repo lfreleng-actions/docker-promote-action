@@ -21,7 +21,9 @@
 # mode: latest applies that rule alone to images another tool has
 # already pushed, for the lane that builds and pushes in one job.
 # mode: validate checks the registry bases alone, early in a job, and
-# contacts no registry.
+# contacts no registry. mode: namespace resolves the image namespace
+# alone, as the docker-workflows lanes' "Resolve image namespace" step
+# did, and contacts no registry either.
 name: "🐳 Docker Promote"
 description: >
   Promote staged container images to a release registry by digest,
@@ -75,8 +77,32 @@ inputs:
       (onap for gerrit.onap.org). Release-file names are then relative
       to it (so/sdnc-adapter); a name already starting with the
       namespace is kept as given, with a notice. Empty adds no prefix.
+      In mode namespace, the value namespace_mode 'manual' resolves to;
+      any other namespace_mode refuses it.
     required: false
     default: ""
+  namespace_mode:
+    description: >
+      mode namespace only: how the namespace output resolves. 'none'
+      gives an empty namespace; 'auto' the owner part of repository,
+      lowercased (A-Z only); 'manual' the namespace input as given.
+      Other modes refuse any value but 'none'.
+    required: false
+    default: "none"
+  repository:
+    description: >
+      mode namespace only: the owner/name repository namespace_mode
+      'auto' takes the owner from, such as github.repository. Other
+      modes refuse it.
+    required: false
+    default: ""
+  dockerhub_publish:
+    description: >
+      mode namespace only: the images publish to Docker Hub, so the
+      resolved namespace must be one path component, the Docker Hub
+      organisation or user. Other modes refuse 'true'.
+    required: false
+    default: "false"
   push_latest:
     description: >
       Also point each image's 'latest' tag at its release digest, once
@@ -123,6 +149,15 @@ inputs:
       crane, logs in or contacts a registry, whatever install_crane,
       dry_run or the credentials say, and refuses containers_json,
       images_json and namespace.
+      'namespace' resolves namespace_mode, namespace and repository
+      to the namespace output and checks it, as the docker-workflows
+      lanes' "Resolve image namespace" step did. Like validate, it
+      never downloads crane, logs in or contacts a registry, whatever
+      install_crane, dry_run or the credentials say, needs no
+      release_tag, and refuses containers_json, images_json,
+      pull_registry and push_registry. It ignores registry_user and
+      registry_password altogether, and reads namespace and repository
+      untrimmed.
     required: false
     default: "promote"
   dry_run:
@@ -164,7 +199,8 @@ inputs:
   summary:
     description: >
       Write a promotion report to the step summary (mode validate: one
-      line per registry base checked)
+      line per registry base checked; mode namespace: the namespace
+      resolved)
     required: false
     default: "true"
 
@@ -204,6 +240,12 @@ outputs:
       Login endpoint (host[:port]) of push_registry; empty for mode
       latest, or when push_registry is empty
     value: ${{ steps.promote.outputs.push_endpoint }}
+  namespace:
+    description: >
+      The namespace applied: in mode namespace, the one namespace_mode
+      resolves (empty for 'none'); in modes promote and verify, the
+      namespace input; empty for modes latest and validate
+    value: ${{ steps.promote.outputs.namespace }}
 
 runs:
   using: "composite"
@@ -217,6 +259,9 @@ runs:
         INPUT_PULL_REGISTRY: ${{ inputs.pull_registry }}
         INPUT_PUSH_REGISTRY: ${{ inputs.push_registry }}
         INPUT_NAMESPACE: ${{ inputs.namespace }}
+        INPUT_NAMESPACE_MODE: ${{ inputs.namespace_mode }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_DOCKERHUB_PUBLISH: ${{ inputs.dockerhub_publish }}
         INPUT_PUSH_LATEST: ${{ inputs.push_latest }}
         INPUT_LATEST_POLICY: ${{ inputs.latest_policy }}
         INPUT_IMAGES_JSON: ${{ inputs.images_json }}

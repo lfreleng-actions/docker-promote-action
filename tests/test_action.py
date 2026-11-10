@@ -1146,6 +1146,250 @@ class ValidateModeTest(SandboxTestCase):
         self.assertEqual(run.summary, "")
 
 
+GRAMMAR = "is not a repository path"
+NOT_MANUAL = "is set but namespace_mode is '{mode}'; set namespace_mode to 'manual'"
+DOCKERHUB = (
+    "dockerhub_publish requires namespace_mode 'auto' or 'manual' resolving to a "
+    "single path component (the Docker Hub organisation or user); got '{ns}' "
+    "from namespace_mode {mode}"
+)
+
+
+class NamespaceModeTest(SandboxTestCase):
+    """mode: namespace resolves the image namespace, contacting nothing."""
+
+    def resolve(self, **extra: str) -> Any:
+        return run_action(self.sandbox, mode="namespace", **extra)
+
+    def resolved(self, expected: str, **extra: str) -> None:
+        run = self.resolve(**extra)
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(run.outputs["namespace"], expected)
+        mode = extra.get("namespace_mode", "none")
+        shown = expected or "&lt;none&gt;"
+        self.assertIn(f"Image namespace ({mode}): {shown}", run.summary)
+
+    def refused(self, message: str, **extra: str) -> None:
+        run = self.resolve(**extra)
+        self.assertEqual(run.status, 1, run.stdout)
+        self.assertEqual(run.calls, [], "a registry was contacted")
+        errors = [a for a in run.annotations if a.startswith("::error::")]
+        self.assertEqual(len(errors), 1, run.annotations)
+        self.assertIn(message, errors[0])
+
+    def test_none(self) -> None:
+        self.resolved("")
+        self.resolved("", namespace_mode="none", repository="Acme/app")
+
+    def test_namespace_without_manual_refused(self) -> None:
+        for mode in ("none", "auto"):
+            with self.subTest(mode=mode):
+                self.refused(
+                    f"namespace 'team' {NOT_MANUAL.format(mode=mode)}",
+                    namespace_mode=mode,
+                    namespace="team",
+                    repository="acme/app",
+                )
+
+    def test_auto_is_the_owner_lowercased(self) -> None:
+        for repository, expected in (
+            ("Acme/app", "acme"),
+            ("lfreleng-actions/x", "lfreleng-actions"),
+            ("ACME-Corp/x", "acme-corp"),
+        ):
+            with self.subTest(repository=repository):
+                self.resolved(expected, namespace_mode="auto", repository=repository)
+
+    def test_auto_owner_outside_the_grammar_refused(self) -> None:
+        for repository, owner in (
+            ("acme_/x", "acme_"),
+            ("acme-/x", "acme-"),
+            # The Kelvin sign lowercases to an ASCII 'k' under str.lower().
+            ("\u212aelvin/x", "\u212aelvin"),
+        ):
+            with self.subTest(repository=repository):
+                self.refused(
+                    f"namespace '{owner}' from namespace_mode auto {GRAMMAR}",
+                    namespace_mode="auto",
+                    repository=repository,
+                )
+
+    def test_auto_needs_a_repository(self) -> None:
+        for repository in ("", "acme", "/app"):
+            with self.subTest(repository=repository):
+                self.refused(
+                    "namespace_mode 'auto' requires the repository input as owner/name",
+                    namespace_mode="auto",
+                    repository=repository,
+                )
+
+    def test_manual_accepted(self) -> None:
+        for namespace in ("team/api", "team", "a__b", "a_b", "a--b", "a.b"):
+            with self.subTest(namespace=namespace):
+                self.resolved(namespace, namespace_mode="manual", namespace=namespace)
+
+    def test_manual_outside_the_grammar_refused(self) -> None:
+        for namespace in ("Team", "/team", "team/", "team//api", "a___b"):
+            with self.subTest(namespace=namespace):
+                self.refused(
+                    f"namespace '{namespace}' from namespace_mode manual {GRAMMAR}",
+                    namespace_mode="manual",
+                    namespace=namespace,
+                )
+
+    def test_manual_needs_a_namespace(self) -> None:
+        self.refused(
+            "namespace_mode 'manual' requires the namespace input",
+            namespace_mode="manual",
+        )
+
+    def test_invalid_namespace_mode_refused(self) -> None:
+        for mode in ("automatic", "", "Auto", " auto"):
+            with self.subTest(mode=mode):
+                self.refused(
+                    f"Invalid namespace_mode '{mode}' (expected none, auto or manual)",
+                    namespace_mode=mode,
+                )
+
+    def test_dockerhub_publish(self) -> None:
+        self.resolved(
+            "team", namespace_mode="manual", namespace="team", dockerhub_publish="true"
+        )
+        self.resolved(
+            "acme",
+            namespace_mode="auto",
+            repository="Acme/app",
+            dockerhub_publish="true",
+        )
+        self.refused(
+            DOCKERHUB.format(ns="", mode="none"),
+            namespace_mode="none",
+            dockerhub_publish="true",
+        )
+        self.refused(
+            DOCKERHUB.format(ns="team/api", mode="manual"),
+            namespace_mode="manual",
+            namespace="team/api",
+            dockerhub_publish="true",
+        )
+
+    def test_dockerhub_publish_is_a_strict_boolean(self) -> None:
+        self.refused(
+            "dockerhub_publish must be 'true' or 'false', got 'maybe'",
+            namespace_mode="manual",
+            namespace="team",
+            dockerhub_publish="maybe",
+        )
+
+    def test_inputs_of_other_modes_refused(self) -> None:
+        others = {
+            "containers_json": containers(("app", "1-s")),
+            "images_json": pushed((GHCR, digest("app"))),
+            "pull_registry": PULL,
+            "push_registry": PUSH,
+        }
+        for key, value in others.items():
+            with self.subTest(key=key):
+                self.refused(f"{key} does not apply to mode: namespace", **{key: value})
+
+    def test_never_installs_crane_logs_in_or_reads(self) -> None:
+        self.sandbox.seed(protected={PULL: "robot:s3cret"})
+        for install_crane, dry_run in (("false", "false"), ("true", "true")):
+            with self.subTest(install_crane=install_crane, dry_run=dry_run):
+                # A crane download would fail through this proxy.
+                run = run_action(
+                    self.sandbox,
+                    {"https_proxy": "http://127.0.0.1:9"},
+                    mode="namespace",
+                    namespace_mode="auto",
+                    repository="acme/app",
+                    install_crane=install_crane,
+                    dry_run=dry_run,
+                    push_latest="true",
+                    registry_user="robot",
+                    registry_password="s3cret",
+                )
+                self.assertEqual(run.status, 0, run.stdout)
+                self.assertEqual(run.outputs["namespace"], "acme")
+                self.assertEqual(run.calls, [])
+                self.assertEqual(list(self.sandbox.temp.iterdir()), [])
+
+    def test_whitespace_kept(self) -> None:
+        # The lanes read namespace and repository untrimmed.
+        for mode in ("none", "auto"):
+            with self.subTest(mode=mode):
+                self.refused(
+                    f"namespace ' ' {NOT_MANUAL.format(mode=mode)}",
+                    namespace_mode=mode,
+                    namespace=" ",
+                    repository="acme/app",
+                )
+        self.refused(
+            f"namespace ' team ' from namespace_mode manual {GRAMMAR}",
+            namespace_mode="manual",
+            namespace=" team ",
+        )
+        self.refused(
+            f"namespace ' acme' from namespace_mode auto {GRAMMAR}",
+            namespace_mode="auto",
+            repository=" Acme/app",
+        )
+
+    def test_credentials_ignored(self) -> None:
+        for credentials in (
+            {"registry_user": "robot"},
+            {"registry_password": "s3cret"},
+            {"registry_user": "robot\nx", "registry_password": "s3cret"},
+        ):
+            with self.subTest(credentials=credentials):
+                self.resolved(
+                    "acme",
+                    namespace_mode="auto",
+                    repository="acme/app",
+                    **credentials,
+                )
+        # Not even read to mask it.
+        run = self.resolve(
+            namespace_mode="auto", repository="acme/app", registry_password="s3cret"
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertNotIn("::add-mask::s3cret", run.annotations)
+
+    def test_summary_optional(self) -> None:
+        run = self.resolve(
+            namespace_mode="auto", repository="acme/app", summary="false"
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+        self.assertEqual(run.outputs["namespace"], "acme")
+        self.assertEqual(run.summary, "")
+
+    def test_namespace_inputs_refused_by_other_modes(self) -> None:
+        for key, value in (
+            ("namespace_mode", "auto"),
+            ("repository", "acme/app"),
+            ("dockerhub_publish", "true"),
+        ):
+            with self.subTest(key=key):
+                run = run_action(
+                    self.sandbox, mode="validate", pull_registry=PULL, **{key: value}
+                )
+                self.assertEqual(run.status, 1, run.stdout)
+                errors = [a for a in run.annotations if a.startswith("::error::")]
+                self.assertEqual(len(errors), 1, run.annotations)
+                self.assertIn(f"{key} applies only to mode: namespace", errors[0])
+
+    def test_namespace_input_defaults_accepted_by_other_modes(self) -> None:
+        run = run_action(
+            self.sandbox,
+            mode="validate",
+            pull_registry=PULL,
+            namespace_mode="none",
+            dockerhub_publish="false",
+        )
+        self.assertEqual(run.status, 0, run.stdout)
+
+
 class SameReferenceTest(SandboxTestCase):
     """A release file naming the release itself: skipped, with a notice."""
 
@@ -1558,3 +1802,22 @@ class ActionYamlTest(unittest.TestCase):
         self.assertTrue(names)
         for name in names:
             self.assertIn(f"INPUT_{name.upper()}: ${{{{ inputs.{name} }}}}", text, name)
+
+    def test_readme_tables_match(self) -> None:
+        text = (ROOT / "action.yaml").read_text()
+        readme = (ROOT / "README.md").read_text()
+        for section, end in (("inputs", "outputs"), ("outputs", "runs")):
+            with self.subTest(section=section):
+                block = text.split(f"\n{section}:\n", 1)[1].split(f"\n{end}:\n", 1)[0]
+                names = [
+                    line.strip().rstrip(":")
+                    for line in block.splitlines()
+                    if line.startswith("  ")
+                    and not line.startswith("   ")
+                    and not line.strip().startswith("#")
+                ]
+                part = readme.split(f"\n## {section.title()}\n", 1)[1]
+                table = part[part.index("\n| ") :].split("\n\n", 1)[0]
+                # A header row and its separator, then one row per name.
+                rows = table.strip().splitlines()[2:]
+                self.assertEqual([row.split("|")[1].strip() for row in rows], names)
