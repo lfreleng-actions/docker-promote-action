@@ -163,8 +163,10 @@ inputs:
   dry_run:
     description: >
       Print the promotion plan without contacting any registry: no
-      download, no login, no reads. The merge lane's dry-run self-test
-      uses it with hosts that hold none of the images.
+      crane download, no login, no reads. The merge lane's dry-run
+      self-test uses it with hosts that hold none of the images. The
+      action's Python setup still runs, and downloads Python 3.12 when
+      the runner's tool cache lacks it.
     required: false
     default: "false"
   on_conflict:
@@ -250,10 +252,22 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # The action picks its own interpreter, so neither the caller's PATH
+    # nor a .python-version file in its checkout decides what runs.
+    # update-environment false leaves the caller's later steps alone.
+    - name: "Set up Python"
+      id: python
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+      with:
+        python-version: "3.12"
+        update-environment: false
+
     - name: "Promote images"
       id: promote
       shell: bash
       env:
+        PYTHON: ${{ steps.python.outputs.python-path }}
         INPUT_CONTAINERS_JSON: ${{ inputs.containers_json }}
         INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         INPUT_PULL_REGISTRY: ${{ inputs.pull_registry }}
@@ -274,12 +288,6 @@ runs:
         INPUT_SUMMARY: ${{ inputs.summary }}
       run: |
         # Promote images
-        # Standard library only, so no setup-python step: GitHub-hosted
-        # runners ship a suitable python3. -I (isolated mode) keeps the
-        # caller's checkout off sys.path; see entrypoint.py.
-        if ! python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
-          > /dev/null 2>&1; then
-          echo "::error::python3 3.11 or later is required on the runner"
-          exit 1
-        fi
-        python3 -I "${GITHUB_ACTION_PATH}/entrypoint.py"
+        # -I (isolated mode) keeps the caller's checkout off sys.path;
+        # see entrypoint.py.
+        "$PYTHON" -I "${GITHUB_ACTION_PATH}/entrypoint.py"
