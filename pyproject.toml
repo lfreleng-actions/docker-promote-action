@@ -8,8 +8,8 @@ description = "Promote staged container images to a release registry by digest"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-# Standard library only: the composite action runs on the runner's own
-# python3 with no install step.
+# Standard library only: the composite action runs on the Python its
+# setup-python step provides, with no package install.
 dependencies = []
 
 [tool.pytest.ini_options]

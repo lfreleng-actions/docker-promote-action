@@ -456,10 +456,12 @@ token. Set `install_crane: false` to use a crane already on PATH.
 
 ### Dry run and verify
 
-`dry_run` keeps the lane's behaviour: no download, no login, no
+`dry_run` keeps the lane's behaviour: no crane download, no login, no
 registry reads, and the same log lines and step summary. The merge
 lane's self-test relies on that, using registry hosts that hold none
-of its images.
+of its images. The action's Python setup still runs on a dry run, so
+it downloads Python 3.12 when the runner's tool cache lacks it (see
+[Development](#development)).
 
 `mode: verify` is the non-writing counterpart of a real run: it checks
 every source and destination as promotion would, fails on any
@@ -515,12 +517,18 @@ step needs: `image` and `digest` for each released image.
 ### Development
 
 The action needs Python 3.11 or later, with no dependencies beyond the
-standard library. It runs on the runner's own `python3`, which every
-current GitHub-hosted image provides at 3.11 or later (`ubuntu-24.04`
-ships 3.12). On a runner whose system `python3` is older, such as
-`ubuntu-22.04` with 3.10, the action fails fast with an error. The
-tests also need Bash and `jq`, which the vendored lane scripts in
-`tests/legacy/` call.
+standard library. It sets up its own Python 3.12 with a pinned
+`actions/setup-python` step and runs it in isolated mode (`-I`), so
+neither the caller's `PATH` nor a `.python-version` file in its
+checkout chooses the interpreter. That step runs with
+`update-environment: false`, leaving `PATH` unchanged for the caller's
+later steps. That step runs in every mode, `dry_run`, `validate` and
+`namespace` included. GitHub-hosted runners carry Python 3.12 in their
+tool cache; elsewhere the step downloads it, so a self-hosted runner
+needs either 3.12 in its tool cache or network access to the
+`actions/python-versions` releases, whatever `python3` its system
+provides. The tests also need Bash and `jq`, which the vendored lane
+scripts in `tests/legacy/` call.
 
 ```shell
 python3 -m unittest discover -s tests -t .
