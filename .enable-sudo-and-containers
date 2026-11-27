@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# Gives Code Monkey sessions on this repository sudo and Docker
+# (lfreleng-actions/github-code-monkey-bot, docs/DESIGN.md section 4.1).
+# Only this file's presence at the root of the default branch counts;
+# the bot never reads its content.
+#
+# Why: this action promotes images between registries with crane, and
+# its real-registry tests run a registry:2 container and seed it with
+# docker buildx imagetools. The unit tests use a fake crane, so a
+# change cannot be checked against a real registry unless the session
+# can run containers.
+#
+# The grant also gives the session the means to undo harden-runner, so
+# remove this file once the repository no longer needs it.
